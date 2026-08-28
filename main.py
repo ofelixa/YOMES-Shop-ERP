@@ -4,17 +4,26 @@ import sys
 import ctypes
 import customtkinter as ctk
 from tkinter import messagebox, ttk, filedialog
-from datetime import datetime
+from datetime import datetime, timedelta
 import calendar
 import csv
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageTk
 import db_manager as db
 import printing_engine as pe
 
-# Explicit Windows AppUserModelID so taskbar displays the custom app icon
+# Matplotlib for Analytics Dashboard
+import matplotlib
+
+matplotlib.use("TkAgg")
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+
 if sys.platform.startswith("win"):
     myappid = "yomes.electrical.erp.v1"
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    except Exception:
+        pass
 
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
@@ -24,7 +33,39 @@ def resource_path(relative_path):
     """Get absolute path to resource, works for dev and for PyInstaller"""
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
-    return os.path.join(os.path.abspath("."), relative_path)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, relative_path)
+
+
+def find_highres_image_file():
+    """Finds image files (JPEG/PNG) strictly for inside visuals and watermarks."""
+    extensions = ["jpeg", "jpg", "png", "JPEG", "JPG", "PNG"]
+    base_names = ["YOMES", "yomes", "logo", "icon", "Logo", "Icon"]
+
+    for ext in extensions:
+        for name in base_names:
+            candidate = f"{name}.{ext}"
+            path = resource_path(candidate)
+            if os.path.exists(path):
+                return path
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        for file in os.listdir(base_dir):
+            if any(file.lower().endswith(f".{ext.lower()}") for ext in extensions):
+                return os.path.join(base_dir, file)
+    except Exception:
+        pass
+    return None
+
+
+def find_ico_file():
+    """Finds .ico strictly for Windows binary taskbar/window icon."""
+    for candidate in ["YOMES.ico", "icon.ico", "yomes.ico"]:
+        p = resource_path(candidate)
+        if os.path.exists(p):
+            return p
+    return None
 
 
 class MasterShopERP(ctk.CTk):
@@ -32,14 +73,21 @@ class MasterShopERP(ctk.CTk):
         super().__init__()
 
         self.title("YOMES Electrical & Home Solution")
-        self.geometry("1280x780")
-        self.minsize(1050, 680)
+        self.geometry("1180x720")
+        self.minsize(980, 600)
 
-        # Set App Window & Taskbar Icon to YOMES.ico
-        icon_file = resource_path("YOMES.ico")
-        if os.path.exists(icon_file):
-            self.iconbitmap(icon_file)
-            self.after(200, lambda: self.iconbitmap(icon_file))
+        # Maximize cleanly on start
+        try:
+            self.after(50, lambda: self.state('zoomed'))
+        except Exception:
+            pass
+
+        self.ico_path = find_ico_file()
+        self.visual_image_path = find_highres_image_file()
+        self._cached_images = {}
+        self._window_icon_photo = None
+
+        self.apply_window_icon()
 
         db.init_db()
         self.current_user = None
@@ -53,8 +101,25 @@ class MasterShopERP(ctk.CTk):
 
         self.show_login_screen()
 
+    def apply_window_icon(self):
+        if self.ico_path and os.path.exists(self.ico_path):
+            try:
+                self.iconbitmap(self.ico_path)
+                self.after(200, lambda: self.iconbitmap(self.ico_path))
+            except Exception:
+                pass
+
+        img_source = self.visual_image_path or self.ico_path
+        if img_source and os.path.exists(img_source):
+            try:
+                pil_img = Image.open(img_source).convert("RGBA")
+                self._window_icon_photo = ImageTk.PhotoImage(pil_img.resize((32, 32)))
+                self.iconphoto(False, self._window_icon_photo)
+            except Exception:
+                pass
+
     # =========================================================================
-    # THEME TOGGLE
+    # THEME & IMAGE HELPERS
     # =========================================================================
     def toggle_theme(self):
         current = ctk.get_appearance_mode()
@@ -65,34 +130,38 @@ class MasterShopERP(ctk.CTk):
             ctk.set_appearance_mode("Dark")
             self.theme_btn.configure(text="Light Mode")
 
+    def load_ctk_image(self, size=(60, 60), opacity=1.0):
+        target_path = self.visual_image_path or self.ico_path
+        if not target_path or not os.path.exists(target_path):
+            return None
+
+        cache_key = f"{size}_{opacity}"
+        if cache_key in self._cached_images:
+            return self._cached_images[cache_key]
+
+        try:
+            pil_img = Image.open(target_path).convert("RGBA")
+            if opacity < 1.0:
+                r, g, b, alpha = pil_img.split()
+                alpha = alpha.point(lambda p: int(p * opacity))
+                pil_img.putalpha(alpha)
+
+            ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=size)
+            self._cached_images[cache_key] = ctk_img
+            return ctk_img
+        except Exception:
+            return None
+
+    def attach_page_watermark(self):
+        wm_img = self.load_ctk_image(size=(360, 360), opacity=0.08)
+        if wm_img:
+            lbl = ctk.CTkLabel(self.content_area, image=wm_img, text="")
+            lbl.place(relx=0.5, rely=0.52, anchor="center")
+            lbl.lower()
+
     # =========================================================================
     # 1. LOGIN & AUTH
     # =========================================================================
-    def get_low_opacity_logo(self, opacity=0.40, size=(75, 75)):
-        for candidate in ["YOMES.png"]:
-            path = resource_path(candidate)
-            if os.path.exists(path):
-                try:
-                    pil_img = Image.open(path).convert("RGBA")
-                    r, g, b, alpha = pil_img.split()
-                    alpha = alpha.point(lambda p: int(p * opacity))
-                    pil_img.putalpha(alpha)
-                    return ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=size)
-                except Exception:
-                    pass
-        return None
-
-    def get_sidebar_logo(self, size=(48, 48)):
-        for candidate in ["YOMES.png", "YOMES.ico"]:
-            path = resource_path(candidate)
-            if os.path.exists(path):
-                try:
-                    pil_img = Image.open(path).convert("RGBA")
-                    return ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=size)
-                except Exception:
-                    pass
-        return None
-
     def show_login_screen(self):
         for widget in self.winfo_children():
             widget.destroy()
@@ -103,11 +172,10 @@ class MasterShopERP(ctk.CTk):
         card = ctk.CTkFrame(self, width=420, height=530, corner_radius=35)
         card.place(relx=0.5, rely=0.5, anchor="center")
 
-        # Low-Opacity Image placed right before the "YOMES ELECTRICAL" header
-        logo_img = self.get_low_opacity_logo(opacity=0.40, size=(72, 72))
+        logo_img = self.load_ctk_image(size=(80, 80), opacity=0.95)
         if logo_img:
-            logo_label = ctk.CTkLabel(card, image=logo_img, text="")
-            logo_label.pack(pady=(25, 0))
+            self.login_logo_label = ctk.CTkLabel(card, image=logo_img, text="")
+            self.login_logo_label.pack(pady=(25, 0))
             title_top_pad = (5, 5)
         else:
             title_top_pad = (35, 5)
@@ -119,19 +187,21 @@ class MasterShopERP(ctk.CTk):
 
         self.ent_user = ctk.CTkEntry(card, placeholder_text="Username", width=240, height=32, corner_radius=15)
         self.ent_user.pack(pady=8)
-        self.ent_user.focus_set()
 
-        self.ent_pass = ctk.CTkEntry(card, placeholder_text="Password", show="*", width=240, height=32, corner_radius=15)
+        self.ent_pass = ctk.CTkEntry(card, placeholder_text="Password", show="*", width=240, height=32,
+                                     corner_radius=15)
         self.ent_pass.pack(pady=8)
 
         self.ent_user.bind("<Return>", lambda e: self.ent_pass.focus_set())
         self.ent_user.bind("<Down>", lambda e: self.ent_pass.focus_set())
-        self.ent_pass.bind("<Up>", lambda e: self.ent_user.focus_set())
+        self.ent_user.bind("<Up>", lambda e: self.ent_user.focus_set())
         self.ent_pass.bind("<Return>", lambda e: self.handle_login())
 
         ctk.CTkButton(card, text="Sign In", width=290, height=42, command=self.handle_login).pack(pady=(15, 10))
         ctk.CTkButton(card, text="Forgot Password?", fg_color="transparent", text_color="#60A5FA",
                       command=self.show_forgot_password_dialog).pack()
+
+        self.after(100, lambda: self.ent_user.focus_force())
 
     def handle_login(self):
         u = self.ent_user.get().strip()
@@ -213,15 +283,22 @@ class MasterShopERP(ctk.CTk):
         ent_np.pack(pady=8)
 
         def load_q():
+            target_user = ent_u.get().strip()
+            if not target_user:
+                messagebox.showwarning("Notice", "Please enter your username first.")
+                return
+
             conn = db.get_connection()
-            user = conn.execute("SELECT security_question FROM users WHERE username = ?",
-                                (ent_u.get().strip(),)).fetchone()
+            user = conn.execute("SELECT security_question FROM users WHERE LOWER(username) = LOWER(?)",
+                                (target_user,)).fetchone()
             conn.close()
+
             if user and user['security_question']:
-                q_lbl.configure(text=f"Question: {user['security_question']}")
+                q_lbl.configure(text=f"Question: {user['security_question']}", text_color="#93C5FD")
                 ent_a.focus_set()
             else:
-                messagebox.showwarning("Notice", "User not found or no question configured.")
+                q_lbl.configure(text="No recovery question found for this account.", text_color="#EF4444")
+                messagebox.showwarning("Notice", "User not found or no recovery question configured.")
 
         def exec_reset():
             ok, msg = db.reset_password_with_security(ent_u.get().strip(), ent_a.get().strip(), ent_np.get())
@@ -238,7 +315,63 @@ class MasterShopERP(ctk.CTk):
         f = ctk.CTkFrame(modal, fg_color="transparent")
         f.pack(pady=10)
         ctk.CTkButton(f, text="Load Question", width=140, command=load_q).pack(side="left", padx=5)
-        ctk.CTkButton(f, text="Reset Password", width=140, fg_color="green", command=exec_reset).pack(side="left", padx=5)
+        ctk.CTkButton(f, text="Reset Password", width=140, fg_color="green", command=exec_reset).pack(side="left",
+                                                                                                      padx=5)
+
+    def show_change_password_dialog(self):
+        modal = ctk.CTkToplevel(self)
+        modal.title("Change Account Password")
+        modal.geometry("400x380")
+        modal.grab_set()
+
+        ctk.CTkLabel(modal, text=f"Change Password: @{self.current_user['username']}",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
+
+        old_p = ctk.CTkEntry(modal, placeholder_text="Current Password", show="*", width=280)
+        old_p.pack(pady=8)
+        old_p.focus_set()
+
+        new_p = ctk.CTkEntry(modal, placeholder_text="New Password", show="*", width=280)
+        new_p.pack(pady=8)
+
+        confirm_p = ctk.CTkEntry(modal, placeholder_text="Confirm New Password", show="*", width=280)
+        confirm_p.pack(pady=8)
+
+        def execute_update():
+            cur = old_p.get()
+            np = new_p.get()
+            cp = confirm_p.get()
+
+            if not cur or not np:
+                messagebox.showwarning("Missing Info", "Please fill in all password fields.")
+                return
+
+            if cur != self.current_user['password']:
+                messagebox.showerror("Auth Error", "Current password does not match.")
+                return
+
+            if len(np) < 4:
+                messagebox.showerror("Too Short", "New password must be at least 4 characters long.")
+                return
+
+            if np != cp:
+                messagebox.showerror("Mismatch", "New password and confirmation do not match.")
+                return
+
+            ok, msg = db.update_user_password(self.current_user['id'], np)
+            if ok:
+                self.current_user['password'] = np
+                messagebox.showinfo("Success", "Password updated successfully!")
+                modal.destroy()
+            else:
+                messagebox.showerror("Error", f"Failed to update: {msg}")
+
+        old_p.bind("<Return>", lambda e: new_p.focus_set())
+        new_p.bind("<Return>", lambda e: confirm_p.focus_set())
+        confirm_p.bind("<Return>", lambda e: execute_update())
+
+        ctk.CTkButton(modal, text="Update Password", width=280, height=38,
+                      fg_color="#2563EB", hover_color="#1D4ED8", command=execute_update).pack(pady=20)
 
     # =========================================================================
     # 2. MAIN DASHBOARD SHELL
@@ -248,21 +381,25 @@ class MasterShopERP(ctk.CTk):
             widget.destroy()
 
         self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=0, minsize=190)
         self.grid_columnconfigure(1, weight=1)
 
-        self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0)
+        self.sidebar = ctk.CTkFrame(self, width=190, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(11, weight=1)
+        self.sidebar.grid_propagate(False)
+        self.sidebar.grid_rowconfigure(13, weight=1)
 
-        # Brand Logo on Sidebar
-        side_logo = self.get_sidebar_logo(size=(48, 48))
+        side_logo = self.load_ctk_image(size=(55, 55), opacity=1.0)
         if side_logo:
-            ctk.CTkLabel(self.sidebar, image=side_logo, text="").grid(row=0, column=0, padx=20, pady=(15, 0))
+            self.sidebar_logo_lbl = ctk.CTkLabel(self.sidebar, image=side_logo, text="")
+            self.sidebar_logo_lbl.grid(row=0, column=0, padx=20, pady=(15, 0))
             store_title_pad = (2, 5)
         else:
             store_title_pad = (20, 5)
 
-        ctk.CTkLabel(self.sidebar, text="YOMES STORE", font=ctk.CTkFont(size=18, weight="bold")).grid(row=1, column=0, padx=20, pady=store_title_pad)
+        ctk.CTkLabel(self.sidebar, text="YOMES STORE", font=ctk.CTkFont(size=18, weight="bold")).grid(row=1, column=0,
+                                                                                                      padx=20,
+                                                                                                      pady=store_title_pad)
         ctk.CTkLabel(self.sidebar, text=f"{self.current_user['role']}: {self.current_user['full_name']}",
                      font=ctk.CTkFont(size=11), text_color="#60A5FA").grid(row=2, column=0, padx=20, pady=(0, 15))
 
@@ -271,20 +408,39 @@ class MasterShopERP(ctk.CTk):
                                        fg_color="gray30", height=30, command=self.toggle_theme)
         self.theme_btn.grid(row=3, column=0, padx=15, pady=(0, 15), sticky="ew")
 
-        ctk.CTkButton(self.sidebar, text="Sales / Checkout", command=lambda: self.switch_view("POS")).grid(row=4, column=0, padx=15, pady=5, sticky="ew")
+        ctk.CTkButton(self.sidebar, text="Sales / Checkout", command=lambda: self.switch_view("POS")).grid(row=4,
+                                                                                                           column=0,
+                                                                                                           padx=15,
+                                                                                                           pady=5,
+                                                                                                           sticky="ew")
         ctk.CTkButton(self.sidebar, text="Sales History", fg_color="#1E3A8A", hover_color="#1E40AF",
                       command=lambda: self.switch_view("HISTORY")).grid(row=5, column=0, padx=15, pady=5, sticky="ew")
-        ctk.CTkButton(self.sidebar, text="Inventory Master", command=lambda: self.switch_view("INV")).grid(row=6, column=0, padx=15, pady=5, sticky="ew")
-        ctk.CTkButton(self.sidebar, text="Customers & Debts", command=lambda: self.switch_view("CUST")).grid(row=7, column=0, padx=15, pady=5, sticky="ew")
+        ctk.CTkButton(self.sidebar, text="Inventory Master", command=lambda: self.switch_view("INV")).grid(row=6,
+                                                                                                           column=0,
+                                                                                                           padx=15,
+                                                                                                           pady=5,
+                                                                                                           sticky="ew")
+        ctk.CTkButton(self.sidebar, text="Customers & Debts", command=lambda: self.switch_view("CUST")).grid(row=7,
+                                                                                                             column=0,
+                                                                                                             padx=15,
+                                                                                                             pady=5,
+                                                                                                             sticky="ew")
 
         if self.current_user['role'] == "Admin":
             ctk.CTkButton(self.sidebar, text="Storekeeper Mgmt", fg_color="#4338CA", hover_color="#3730A3",
                           command=lambda: self.switch_view("USERS")).grid(row=8, column=0, padx=15, pady=5, sticky="ew")
             ctk.CTkButton(self.sidebar, text="Analytics & Profit", fg_color="#0F766E", hover_color="#115E59",
-                          command=lambda: self.switch_view("ANALYTICS")).grid(row=9, column=0, padx=15, pady=5, sticky="ew")
+                          command=lambda: self.switch_view("ANALYTICS")).grid(row=9, column=0, padx=15, pady=5,
+                                                                              sticky="ew")
+            ctk.CTkButton(self.sidebar, text="Backup & Restore", fg_color="#7C3AED", hover_color="#6D28D9",
+                          command=self.show_backup_restore_modal).grid(row=10, column=0, padx=15, pady=5, sticky="ew")
+
+        ctk.CTkButton(self.sidebar, text="Change Password", fg_color="#334155", hover_color="#475569",
+                      command=self.show_change_password_dialog).grid(row=12, column=0, padx=15, pady=(0, 5),
+                                                                     sticky="ew")
 
         ctk.CTkButton(self.sidebar, text="Logout", fg_color="#991B1B", hover_color="#7F1D1D",
-                      command=self.show_login_screen).grid(row=12, column=0, padx=15, pady=20, sticky="ew")
+                      command=self.show_login_screen).grid(row=14, column=0, padx=15, pady=15, sticky="ew")
 
         self.content_area = ctk.CTkFrame(self)
         self.content_area.grid(row=0, column=1, sticky="nsew", padx=15, pady=15)
@@ -308,8 +464,10 @@ class MasterShopERP(ctk.CTk):
         elif view_name == "ANALYTICS" and self.current_user['role'] == "Admin":
             self.render_analytics_view()
 
+        self.attach_page_watermark()
+
     # =========================================================================
-    # 3. POS TERMINAL (WITH DYNAMIC CUSTOMER DEBT BALANCE)
+    # 3. POS TERMINAL
     # =========================================================================
     def render_pos_view(self):
         self.content_area.grid_columnconfigure(0, weight=3)
@@ -325,9 +483,17 @@ class MasterShopERP(ctk.CTk):
         search_card.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
         search_card.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(search_card, text="Search & Select Product:", font=ctk.CTkFont(size=12, weight="bold")).grid(row=0, column=0, columnspan=3, padx=10, pady=(5, 2), sticky="w")
+        ctk.CTkLabel(search_card, text="Search & Select Product:", font=ctk.CTkFont(size=12, weight="bold")).grid(row=0,
+                                                                                                                  column=0,
+                                                                                                                  columnspan=3,
+                                                                                                                  padx=10,
+                                                                                                                  pady=(
+                                                                                                                      5,
+                                                                                                                      2),
+                                                                                                                  sticky="w")
 
-        self.pos_search_entry = ctk.CTkEntry(search_card, placeholder_text="Type product name to search...", height=38, font=ctk.CTkFont(size=13))
+        self.pos_search_entry = ctk.CTkEntry(search_card, placeholder_text="Type product name to search...", height=38,
+                                             font=ctk.CTkFont(size=13))
         self.pos_search_entry.grid(row=1, column=0, padx=(10, 5), pady=(0, 5), sticky="ew")
 
         self.pos_q_ent = ctk.CTkEntry(search_card, width=65, placeholder_text="Qty", height=38)
@@ -341,7 +507,8 @@ class MasterShopERP(ctk.CTk):
         self.suggest_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
         self.suggest_frame.grid_remove()
 
-        self.suggest_list = ttk.Treeview(self.suggest_frame, columns=("name", "price", "stock", "status"), show="headings", height=4)
+        self.suggest_list = ttk.Treeview(self.suggest_frame, columns=("name", "price", "stock", "status"),
+                                         show="headings", height=4)
         self.suggest_list.heading("name", text="Product Name")
         self.suggest_list.heading("price", text="Selling Price (GHS)")
         self.suggest_list.heading("stock", text="Stock Available")
@@ -392,49 +559,66 @@ class MasterShopERP(ctk.CTk):
         cart_actions = ctk.CTkFrame(left, fg_color="transparent")
         cart_actions.grid(row=3, column=0, sticky="ew", padx=10, pady=8)
 
-        ctk.CTkButton(cart_actions, text="Increase (+ / Up)", width=120, command=self.increase_cart_item).pack(side="left", padx=4)
-        ctk.CTkButton(cart_actions, text="Decrease (- / Down)", width=120, fg_color="gray40", command=self.decrease_cart_item).pack(side="left", padx=4)
-        ctk.CTkButton(cart_actions, text="Remove (Del)", width=105, fg_color="#DC2626", hover_color="#991B1B", command=self.remove_cart_item).pack(side="left", padx=4)
-        ctk.CTkButton(cart_actions, text="Clear Cart", width=80, fg_color="#7F1D1D", command=self.clear_pos_cart).pack(side="right", padx=4)
+        ctk.CTkButton(cart_actions, text="Increase (+ / Up)", width=120, command=self.increase_cart_item).pack(
+            side="left", padx=4)
+        ctk.CTkButton(cart_actions, text="Decrease (- / Down)", width=120, fg_color="gray40",
+                      command=self.decrease_cart_item).pack(side="left", padx=4)
+        ctk.CTkButton(cart_actions, text="Remove (Del)", width=105, fg_color="#DC2626", hover_color="#991B1B",
+                      command=self.remove_cart_item).pack(side="left", padx=4)
+        ctk.CTkButton(cart_actions, text="Clear Cart", width=90, fg_color="#7F1D1D", hover_color="#581C1C",
+                      command=self.clear_pos_cart).pack(side="right", padx=4)
 
         right = ctk.CTkFrame(self.content_area)
         right.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
 
-        ctk.CTkLabel(right, text="Billing & Finalization", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=10)
+        header_frame = ctk.CTkFrame(right, fg_color="transparent")
+        header_frame.pack(fill="x", pady=(10, 5))
+        pos_badge = self.load_ctk_image(size=(32, 32), opacity=1.0)
+        if pos_badge:
+            ctk.CTkLabel(header_frame, image=pos_badge, text="").pack(side="left", padx=(15, 5))
+        ctk.CTkLabel(header_frame, text="Billing & Printing Options", font=ctk.CTkFont(size=16, weight="bold")).pack(
+            side="left")
 
-        # Customer Header & Add Button
         cust_row = ctk.CTkFrame(right, fg_color="transparent")
-        cust_row.pack(fill="x", padx=15, pady=(10, 0))
+        cust_row.pack(fill="x", padx=15, pady=(5, 0))
 
         ctk.CTkLabel(cust_row, text="Customer Account:").pack(side="left")
         ctk.CTkButton(cust_row, text="+ New Customer", width=105, height=24, font=ctk.CTkFont(size=11),
-                      fg_color="#2563EB", hover_color="#1D4ED8", command=self.show_quick_add_customer_dialog).pack(side="right")
+                      fg_color="#2563EB", hover_color="#1D4ED8", command=self.show_quick_add_customer_dialog).pack(
+            side="right")
 
-        self.pos_c_cb = ctk.CTkComboBox(right, width=280, values=["Walk-in (Cash Only)"], command=self.on_pos_customer_changed)
+        self.pos_c_cb = ctk.CTkComboBox(right, width=280, values=["Walk-in (Cash Only)"],
+                                        command=self.on_pos_customer_changed)
         self.pos_c_cb.pack(fill="x", padx=15, pady=(5, 2))
 
-        # Dynamic Customer Current Debt Display
         self.pos_cust_debt_lbl = ctk.CTkLabel(right, text="Account: Walk-in (No Debt Record)",
                                               font=ctk.CTkFont(size=11, weight="bold"), text_color="gray")
-        self.pos_cust_debt_lbl.pack(anchor="w", padx=18, pady=(0, 6))
+        self.pos_cust_debt_lbl.pack(anchor="w", padx=18, pady=(0, 4))
 
-        ctk.CTkLabel(right, text="Payment Method:").pack(anchor="w", padx=15, pady=(6, 0))
+        ctk.CTkLabel(right, text="Payment Method:").pack(anchor="w", padx=15, pady=(4, 0))
         self.pos_m_cb = ctk.CTkComboBox(right, width=280, values=["CASH", "MOMO", "CREDIT / ON ACCOUNT"])
-        self.pos_m_cb.pack(fill="x", padx=15, pady=5)
+        self.pos_m_cb.pack(fill="x", padx=15, pady=3)
 
-        ctk.CTkLabel(right, text="Amount Paid (GHS):").pack(anchor="w", padx=15, pady=(10, 0))
+        ctk.CTkLabel(right, text="Amount Paid (GHS):").pack(anchor="w", padx=15, pady=(6, 0))
         self.pos_paid_ent = ctk.CTkEntry(right, placeholder_text="0.00", width=280, height=36)
-        self.pos_paid_ent.pack(fill="x", padx=15, pady=5)
+        self.pos_paid_ent.pack(fill="x", padx=15, pady=3)
+        self.pos_paid_ent.bind("<KeyRelease>", lambda e: self.update_change_calculation())
         self.pos_paid_ent.bind("<Return>", lambda e: self.execute_pos_checkout("THERMAL"))
 
-        self.pos_total_lbl = ctk.CTkLabel(right, text="Total: GHS 0.00", font=ctk.CTkFont(size=22, weight="bold"),
+        self.pos_total_lbl = ctk.CTkLabel(right, text="Total: GHS 0.00", font=ctk.CTkFont(size=20, weight="bold"),
                                           text_color="#10B981")
-        self.pos_total_lbl.pack(pady=15)
+        self.pos_total_lbl.pack(pady=(8, 2))
 
-        ctk.CTkButton(right, text="Checkout & Thermal Slip", height=42,
-                      command=lambda: self.execute_pos_checkout("THERMAL")).pack(fill="x", padx=15, pady=6)
-        ctk.CTkButton(right, text="Checkout & A4 PDF Invoice", height=42, fg_color="#047857", hover_color="#065F46",
-                      command=lambda: self.execute_pos_checkout("A4")).pack(fill="x", padx=15, pady=6)
+        self.pos_change_lbl = ctk.CTkLabel(right, text="Change to Return: GHS 0.00",
+                                           font=ctk.CTkFont(size=13, weight="bold"),
+                                           text_color="gray")
+        self.pos_change_lbl.pack(pady=(0, 10))
+
+        ctk.CTkButton(right, text="Checkout (Thermal POS Slip)", height=42, fg_color="#2563EB", hover_color="#1D4ED8",
+                      command=lambda: self.execute_pos_checkout("THERMAL")).pack(fill="x", padx=15, pady=5)
+        ctk.CTkButton(right, text="Generate A4 Official Invoice", height=42, fg_color="#047857",
+                      hover_color="#065F46",
+                      command=lambda: self.execute_pos_checkout("A4")).pack(fill="x", padx=15, pady=5)
 
         self.populate_pos_data()
         self.render_cart_tree()
@@ -451,6 +635,36 @@ class MasterShopERP(ctk.CTk):
                 self.pos_cust_debt_lbl.configure(text="Current Debt Balance: GHS 0.00 (Clear)", text_color="#10B981")
         else:
             self.pos_cust_debt_lbl.configure(text="Account: Walk-in (No Debt Record)", text_color="gray")
+        self.update_change_calculation()
+
+    def update_change_calculation(self):
+        total = sum(i['line_total'] for i in self.cart)
+        paid_str = self.pos_paid_ent.get().strip()
+
+        if total == 0:
+            self.pos_change_lbl.configure(text="Change to Return: GHS 0.00", text_color="gray")
+            return
+
+        if not paid_str:
+            self.pos_change_lbl.configure(text=f"Invoice Balance: GHS {total:.2f}", text_color="gray")
+            return
+
+        try:
+            paid = float(paid_str)
+        except ValueError:
+            self.pos_change_lbl.configure(text="Invalid amount", text_color="#EF4444")
+            return
+
+        cust = self.customer_map.get(self.pos_c_cb.get())
+        if paid >= total:
+            change = paid - total
+            self.pos_change_lbl.configure(text=f"Change to Give: GHS {change:.2f}", text_color="#10B981")
+        else:
+            deficit = total - paid
+            if cust:
+                self.pos_change_lbl.configure(text=f"Deferred Debt to Add: GHS {deficit:.2f}", text_color="#EF4444")
+            else:
+                self.pos_change_lbl.configure(text=f"Invoice Unpaid Bal: GHS {deficit:.2f}", text_color="#F59E0B")
 
     def show_quick_add_customer_dialog(self):
         modal = ctk.CTkToplevel(self)
@@ -458,7 +672,8 @@ class MasterShopERP(ctk.CTk):
         modal.geometry("380x310")
         modal.grab_set()
 
-        ctk.CTkLabel(modal, text="Quick Register Customer", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(15, 10))
+        ctk.CTkLabel(modal, text="Quick Register Customer", font=ctk.CTkFont(size=16, weight="bold")).pack(
+            pady=(15, 10))
 
         n_ent = ctk.CTkEntry(modal, placeholder_text="Full Name", width=280, height=36)
         n_ent.pack(pady=6)
@@ -485,7 +700,7 @@ class MasterShopERP(ctk.CTk):
                 conn.commit()
                 conn.close()
 
-                self.populate_pos_data()
+                self.populate_pos_data_keep_cart()
                 new_key = f"{name} ({phone}) - Debt: GHS 0.00"
                 if new_key in self.customer_map:
                     self.pos_c_cb.set(new_key)
@@ -529,6 +744,35 @@ class MasterShopERP(ctk.CTk):
             self.customer_map[f"{c['name']} ({c['phone']}) - Debt: GHS {c['current_debt']:.2f}"] = dict(c)
         self.pos_c_cb.configure(values=list(self.customer_map.keys()))
         self.on_pos_customer_changed()
+
+    def populate_pos_data_keep_cart(self):
+        """Refreshes product list & debt balances in background while keeping the current cart intact."""
+        conn = db.get_connection()
+        self.all_products = [dict(p) for p in conn.execute(
+            "SELECT * FROM products WHERE stock_quantity > 0 ORDER BY name ASC").fetchall()]
+        custs = conn.execute("SELECT * FROM customers ORDER BY name ASC").fetchall()
+        conn.close()
+
+        # Update available stock ceilings for active cart items
+        for item in self.cart:
+            current_p = next((p for p in self.all_products if p['id'] == item['id']), None)
+            if current_p:
+                item['max_stock'] = current_p['stock_quantity']
+
+        # Re-sync customer dictionary without resetting selection
+        current_selection = self.pos_c_cb.get()
+        self.customer_map = {"Walk-in (Cash Only)": None}
+        matched_selection = None
+        for c in custs:
+            key = f"{c['name']} ({c['phone']}) - Debt: GHS {c['current_debt']:.2f}"
+            self.customer_map[key] = dict(c)
+            if current_selection.startswith(f"{c['name']} ({c['phone']})"):
+                matched_selection = key
+
+        self.pos_c_cb.configure(values=list(self.customer_map.keys()))
+        if matched_selection:
+            self.pos_c_cb.set(matched_selection)
+            self.on_pos_customer_changed(matched_selection)
 
     def on_search_typing(self, event):
         if event.keysym in ("Down", "Up", "Return"):
@@ -680,6 +924,8 @@ class MasterShopERP(ctk.CTk):
             self.cart_tree.selection_set(row_ids[target_idx])
             self.cart_tree.focus(row_ids[target_idx])
 
+        self.update_change_calculation()
+
     def increase_cart_item(self):
         sel = self.cart_tree.selection()
         if not sel:
@@ -723,104 +969,200 @@ class MasterShopERP(ctk.CTk):
 
     def clear_pos_cart(self):
         self.cart = []
+        self.pos_paid_ent.delete(0, 'end')
+
+        # Reset Customer selection back to Walk-in default
+        if "Walk-in (Cash Only)" in self.customer_map:
+            self.pos_c_cb.set("Walk-in (Cash Only)")
+        self.on_pos_customer_changed("Walk-in (Cash Only)")
+
         self.render_cart_tree()
+        self.update_change_calculation()
+        self.pos_search_entry.focus_set()
 
     def execute_pos_checkout(self, print_type):
         if not self.cart:
-            messagebox.showwarning("Empty", "Cart is empty.")
+            messagebox.showwarning("Empty Cart", "Cart is empty. Please add products first.")
             return
         total = sum(i['line_total'] for i in self.cart)
-        try:
-            paid = float(self.pos_paid_ent.get().strip() or total)
-        except ValueError:
-            messagebox.showerror("Error", "Invalid payment amount.")
-            return
+        paid_str = self.pos_paid_ent.get().strip()
 
         cust = self.customer_map.get(self.pos_c_cb.get())
-        balance = max(0.0, total - paid)
 
-        if balance > 0 and not cust:
-            messagebox.showwarning("Debtor Account Required",
-                                   "You must select a registered customer to grant credit / deferred balance.")
+        if print_type == "THERMAL":
+            if not cust and not paid_str:
+                messagebox.showwarning("Payment Required", "Walk-in cash sales must be paid in full before checkout.")
+                self.pos_paid_ent.focus_set()
+                return
+
+        try:
+            paid = float(paid_str) if paid_str else 0.0
+            if paid < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Invalid Amount", "Please enter a valid payment amount.")
+            return
+
+        if paid >= total:
+            actual_paid = total
+            change = paid - total
+            balance = 0.0
+        else:
+            actual_paid = paid
+            change = 0.0
+            balance = total - paid
+
+        if print_type == "THERMAL" and balance > 0 and not cust:
+            messagebox.showerror(
+                "Credit Prohibited for Walk-ins",
+                f"Walk-in sales cannot carry an unpaid balance of GHS {balance:.2f}.\n\n"
+                "Please collect full payment or switch to a registered Customer Account."
+            )
             return
 
         receipt_no = f"REC-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        ok, res = db.process_sale_transaction(receipt_no, cust['id'] if cust else None, self.pos_m_cb.get(), self.cart,
-                                              total, paid, balance, self.current_user['id'])
+        ok, res = db.process_sale_transaction(
+            receipt_no,
+            cust['id'] if cust else None,
+            self.pos_m_cb.get(),
+            self.cart,
+            total,
+            actual_paid,
+            balance,
+            self.current_user['id']
+        )
         if not ok:
             messagebox.showerror("Error", str(res))
             return
 
         sale_id, low_stock_warnings = res
-
         date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
         if print_type == "THERMAL":
-            txt = pe.generate_thermal_slip_text(receipt_no, date_str, self.cart, total, paid, balance,
-                                                cust['name'] if cust else "Walk-in")
-            with open(f"{receipt_no}.txt", "w") as f:
-                f.write(txt)
-            messagebox.showinfo("Thermal Slip Generated", f"Slip Generated:\n\n{txt}")
+            try:
+                pe.print_thermal_receipt_direct(
+                    receipt_no,
+                    date_str,
+                    self.cart,
+                    total,
+                    paid,
+                    balance,
+                    cust['name'] if cust else "Walk-in",
+                    change=change
+                )
+            except Exception as e:
+                messagebox.showerror("Printer Error",
+                                     f"Could not print receipt: {str(e)}\nEnsure printer is powered on and set as default.")
+
+            msg = f"Thermal Slip #{receipt_no} sent to printer.\n\nTotal: GHS {total:.2f}\nPaid: GHS {paid:.2f}"
+            if change > 0:
+                msg += f"\nChange: GHS {change:.2f}"
+            if balance > 0:
+                msg += f"\nDebt Added: GHS {balance:.2f}"
+            messagebox.showinfo("Receipt Completed", msg)
+
         else:
-            pdf_name = f"{receipt_no}.pdf"
-            pe.generate_a4_invoice_pdf(pdf_name, receipt_no, date_str, self.cart, total, paid, balance, cust)
-            messagebox.showinfo("Invoice Saved", f"A4 PDF saved as: {pdf_name}")
+            pdf_name = f"{receipt_no}_A4_Invoice.pdf"
+            pe.generate_a4_invoice_pdf(
+                pdf_name,
+                receipt_no,
+                date_str,
+                self.cart,
+                total,
+                paid,
+                balance,
+                cust,
+                change=change
+            )
+
+            try:
+                if sys.platform.startswith("win"):
+                    os.startfile(pdf_name)
+            except Exception:
+                pass
+
+            inv_msg = f"Official A4 Invoice saved as:\n{pdf_name}\n\nTotal: GHS {total:.2f} | Paid: GHS {paid:.2f}"
+            if balance > 0:
+                inv_msg += f" | Balance: GHS {balance:.2f}"
+            messagebox.showinfo("Invoice Generated", inv_msg)
 
         if low_stock_warnings:
             lines = []
             for w in low_stock_warnings:
                 rem = w['stock_quantity']
                 thresh = w['reorder_level']
-                severity = "CRITICAL DEPLETION" if rem <= thresh / 2 else "LOW STOCK"
-                lines.append(f"- {w['name']}: Only {rem} remaining (Alert Limit: {thresh}) [{severity}]")
-            messagebox.showwarning("Stock Alert Notice", "The following items have crossed their minimum threshold:\n\n" + "\n".join(lines))
+                pct = (rem / (thresh * 5)) * 100 if thresh > 0 else 0
+                severity = f"CRITICAL DEPLETION ({pct:.0f}% Left)" if rem <= thresh / 2 else f"LOW STOCK ({pct:.0f}% Left)"
+                lines.append(
+                    f"- {w['name']}: Only {rem} remaining [{pct:.0f}% Left] (Alert Limit: {thresh}) [{severity}]")
+            messagebox.showwarning("Stock Alert Notice",
+                                   "The following items have crossed their minimum threshold:\n\n" + "\n".join(lines))
 
-        self.clear_pos_cart()
-        self.pos_paid_ent.delete(0, 'end')
-        self.populate_pos_data()
+        # Keeps cart and on-screen items intact after printing
+        self.populate_pos_data_keep_cart()
         self.pos_search_entry.focus_set()
 
     # =========================================================================
-    # 4. SALES HISTORY & DAY LEDGER (CALENDAR PICKER & EXPORT)
+    # 4. SALES HISTORY & DAY LEDGER
     # =========================================================================
     def render_sales_history_view(self):
         ctk.CTkLabel(self.content_area, text="Daily Sales History & Day Ledger",
-                     font=ctk.CTkFont(size=20, weight="bold")).pack(anchor="w", pady=(5, 5))
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", pady=(2, 4), padx=5)
 
         top_filter_bar = ctk.CTkFrame(self.content_area)
-        top_filter_bar.pack(fill="x", pady=5)
+        top_filter_bar.pack(fill="x", pady=3, padx=5)
 
-        ctk.CTkLabel(top_filter_bar, text="Selected Date:", font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=(10, 5))
+        ctk.CTkLabel(top_filter_bar, text="Date:", font=ctk.CTkFont(size=11, weight="bold")).pack(side="left",
+                                                                                                  padx=(6, 2))
 
-        self.cal_btn = ctk.CTkButton(top_filter_bar, text=f"📅 {self.selected_history_date}", width=140, fg_color="#3B82F6", hover_color="#2563EB",
+        self.cal_btn = ctk.CTkButton(top_filter_bar, text=f"📅 {self.selected_history_date}", width=120, height=30,
+                                     fg_color="#3B82F6", hover_color="#2563EB",
                                      command=lambda: self.open_calendar_picker_dialog(history_tv, stat_lbl))
-        self.cal_btn.pack(side="left", padx=5)
+        self.cal_btn.pack(side="left", padx=3)
 
-        ctk.CTkButton(top_filter_bar, text="Today", width=70, fg_color="gray40", hover_color="gray30",
-                      command=lambda: self.set_history_to_today(history_tv, stat_lbl)).pack(side="left", padx=3)
+        ctk.CTkButton(top_filter_bar, text="Today", width=60, height=30, fg_color="gray40", hover_color="gray30",
+                      command=lambda: self.set_history_to_today(history_tv, stat_lbl)).pack(side="left", padx=2)
 
-        ctk.CTkButton(top_filter_bar, text="Export CSV", width=100, fg_color="#0F766E", hover_color="#115E59",
-                      command=lambda: self.export_sales_to_csv(self.selected_history_date)).pack(side="right", padx=5)
-        ctk.CTkButton(top_filter_bar, text="Export PDF Report", width=130, fg_color="#4338CA", hover_color="#3730A3",
-                      command=lambda: self.export_sales_to_pdf(self.selected_history_date)).pack(side="right", padx=5)
+        ctk.CTkButton(top_filter_bar, text="Export CSV", width=90, height=30, fg_color="#0F766E", hover_color="#115E59",
+                      command=lambda: self.export_sales_to_csv(self.selected_history_date)).pack(side="right", padx=3)
+        ctk.CTkButton(top_filter_bar, text="Export PDF", width=95, height=30, fg_color="#4338CA", hover_color="#3730A3",
+                      command=lambda: self.export_sales_to_pdf(self.selected_history_date)).pack(side="right", padx=3)
 
-        stat_bar = ctk.CTkFrame(self.content_area, fg_color="#1E293B", height=38)
-        stat_bar.pack(fill="x", pady=5)
-        stat_lbl = ctk.CTkLabel(stat_bar, text="Loading Day Metrics...", font=ctk.CTkFont(size=13, weight="bold"), text_color="white")
-        stat_lbl.pack(side="left", padx=15, pady=6)
+        stat_bar = ctk.CTkFrame(self.content_area, fg_color="#1E293B", height=32)
+        stat_bar.pack(fill="x", pady=3, padx=5)
+        stat_lbl = ctk.CTkLabel(stat_bar, text="Loading Day Metrics...", font=ctk.CTkFont(size=11, weight="bold"),
+                                text_color="white")
+        stat_lbl.pack(side="left", padx=10, pady=4)
 
-        cols = ("Time", "Receipt No", "Customer", "Payment Method", "Total (GHS)", "Paid (GHS)", "Balance (GHS)", "Cashier")
-        history_tv = ttk.Treeview(self.content_area, columns=cols, show="headings", height=13)
+        tree_frame = ctk.CTkFrame(self.content_area)
+        tree_frame.pack(fill="both", expand=True, pady=4, padx=5)
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        cols = ("Time", "Receipt No", "Customer", "Payment Method", "Total (GHS)", "Paid (GHS)", "Balance (GHS)",
+                "Cashier")
+        history_tv = ttk.Treeview(tree_frame, columns=cols, show="headings", height=10)
+
+        col_widths = {
+            "Time": 50, "Receipt No": 130, "Customer": 120, "Payment Method": 75,
+            "Total (GHS)": 75, "Paid (GHS)": 75, "Balance (GHS)": 75, "Cashier": 65
+        }
         for c in cols:
             history_tv.heading(c, text=c)
-            history_tv.column(c, width=120, anchor="center")
-        history_tv.column("Customer", width=160, anchor="w")
-        history_tv.pack(fill="both", expand=True, pady=8)
+            history_tv.column(c, width=col_widths.get(c, 80), anchor="center")
+        history_tv.column("Customer", anchor="w")
+        history_tv.grid(row=0, column=0, sticky="nsew")
+
+        sb_y = ttk.Scrollbar(tree_frame, orient="vertical", command=history_tv.yview)
+        history_tv.configure(yscrollcommand=sb_y.set)
+        sb_y.grid(row=0, column=1, sticky="ns")
 
         history_tv.bind("<Double-1>", lambda e: self.open_sale_details_modal(history_tv))
 
         ctrl_bar = ctk.CTkFrame(self.content_area)
-        ctrl_bar.pack(fill="x", pady=5)
-        ctk.CTkButton(ctrl_bar, text="View Sale Line Items (Double-Click)", width=230, command=lambda: self.open_sale_details_modal(history_tv)).pack(side="left", padx=5)
+        ctrl_bar.pack(fill="x", pady=4, padx=5)
+        ctk.CTkButton(ctrl_bar, text="View Sale Line Items (Double-Click)", width=210, height=32,
+                      command=lambda: self.open_sale_details_modal(history_tv)).pack(side="left", padx=5)
 
         self.load_sales_history_table(history_tv, stat_lbl, self.selected_history_date)
 
@@ -854,16 +1196,18 @@ class MasterShopERP(ctk.CTk):
                 w.destroy()
 
             for idx, d_name in enumerate(["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]):
-                ctk.CTkLabel(days_frame, text=d_name, font=ctk.CTkFont(size=11, weight="bold"), width=36).grid(row=0, column=idx, pady=2)
+                ctk.CTkLabel(days_frame, text=d_name, font=ctk.CTkFont(size=11, weight="bold"), width=36).grid(row=0,
+                                                                                                               column=idx,
+                                                                                                               pady=2)
 
             month_matrix = calendar.monthcalendar(cal_state['year'], cal_state['month'])
             for r_idx, week in enumerate(month_matrix, start=1):
                 for c_idx, day in enumerate(week):
                     if day != 0:
                         is_current = (
-                            cal_state['year'] == cur_dt.year and
-                            cal_state['month'] == cur_dt.month and
-                            day == cur_dt.day
+                                cal_state['year'] == cur_dt.year and
+                                cal_state['month'] == cur_dt.month and
+                                day == cur_dt.day
                         )
                         btn = ctk.CTkButton(
                             days_frame,
@@ -944,7 +1288,8 @@ class MasterShopERP(ctk.CTk):
                 s['cashier_name'] or "System"
             ), tags=(s['id'],))
 
-        stat_lbl.configure(text=f"Date: {query_date}  |  Orders: {len(sales)}  |  Gross Sales: GHS {total_rev:.2f}  |  Collected: GHS {total_paid:.2f}  |  Debt Balance: GHS {total_bal:.2f}")
+        stat_lbl.configure(
+            text=f"Date: {query_date}  |  Orders: {len(sales)}  |  Gross Sales: GHS {total_rev:.2f}  |  Collected: GHS {total_paid:.2f}  |  Debt Balance: GHS {total_bal:.2f}")
 
     def open_sale_details_modal(self, tv):
         sel = tv.selection()
@@ -983,9 +1328,13 @@ class MasterShopERP(ctk.CTk):
 
         card = ctk.CTkFrame(modal)
         card.pack(fill="x", padx=15, pady=10)
-        ctk.CTkLabel(card, text=f"Order Breakdown: {receipt_no}", font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", padx=10, pady=(10, 2))
+        ctk.CTkLabel(card, text=f"Order Breakdown: {receipt_no}", font=ctk.CTkFont(size=16, weight="bold")).pack(
+            anchor="w", padx=10, pady=(10, 2))
         meta_str = f"Date: {sale['sale_date']} | Cashier: {sale['cashier_name']}\nCustomer: {sale['customer_name'] or 'Walk-in'} | Method: {sale['payment_method']}"
-        ctk.CTkLabel(card, text=meta_str, font=ctk.CTkFont(size=11), text_color="gray", justify="left").pack(anchor="w", padx=10, pady=(0, 10))
+        ctk.CTkLabel(card, text=meta_str, font=ctk.CTkFont(size=11), text_color="gray", justify="left").pack(anchor="w",
+                                                                                                             padx=10,
+                                                                                                             pady=(0,
+                                                                                                                   10))
 
         cols = ("Item", "Qty", "Unit Price (GHS)", "Total (GHS)")
         item_tv = ttk.Treeview(modal, columns=cols, show="headings", height=7)
@@ -996,11 +1345,14 @@ class MasterShopERP(ctk.CTk):
         item_tv.pack(fill="both", expand=True, padx=15, pady=5)
 
         for it in items:
-            item_tv.insert("", "end", values=(it['product_name'] or "Deleted Product", it['quantity'], f"{it['unit_price']:.2f}", f"{it['line_total']:.2f}"))
+            item_tv.insert("", "end",
+                           values=(it['product_name'] or "Deleted Product", it['quantity'], f"{it['unit_price']:.2f}",
+                                   f"{it['line_total']:.2f}"))
 
         sum_bar = ctk.CTkFrame(modal, fg_color="transparent")
         sum_bar.pack(fill="x", padx=15, pady=10)
-        ctk.CTkLabel(sum_bar, text=f"Total: GHS {sale['total_amount']:.2f}  |  Paid: GHS {sale['amount_paid']:.2f}  |  Balance: GHS {sale['balance_due']:.2f}",
+        ctk.CTkLabel(sum_bar,
+                     text=f"Total: GHS {sale['total_amount']:.2f}  |  Paid: GHS {sale['amount_paid']:.2f}  |  Balance: GHS {sale['balance_due']:.2f}",
                      font=ctk.CTkFont(size=13, weight="bold"), text_color="#10B981").pack(side="right")
 
     def export_sales_to_csv(self, query_date):
@@ -1028,9 +1380,13 @@ class MasterShopERP(ctk.CTk):
         try:
             with open(file_path, mode="w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["Date Time", "Receipt No", "Customer", "Payment Method", "Total (GHS)", "Amount Paid (GHS)", "Balance Due (GHS)", "Cashier"])
+                writer.writerow(
+                    ["Date Time", "Receipt No", "Customer", "Payment Method", "Total (GHS)", "Amount Paid (GHS)",
+                     "Balance Due (GHS)", "Cashier"])
                 for s in sales:
-                    writer.writerow([s['sale_date'], s['receipt_no'], s['customer'], s['payment_method'], s['total_amount'], s['amount_paid'], s['balance_due'], s['cashier']])
+                    writer.writerow(
+                        [s['sale_date'], s['receipt_no'], s['customer'], s['payment_method'], s['total_amount'],
+                         s['amount_paid'], s['balance_due'], s['cashier']])
             messagebox.showinfo("Export Successful", f"Sales successfully exported to:\n{file_path}")
         except Exception as e:
             messagebox.showerror("Export Error", str(e))
@@ -1413,52 +1769,68 @@ class MasterShopERP(ctk.CTk):
                                          "Yes" if u['must_change_password'] else "No", u['created_at']))
 
     # =========================================================================
-    # 7. INVENTORY MASTER (WITH EDIT / RESTOCK SUPPORT)
+    # 7. INVENTORY MASTER (PERCENTAGE LEFT WITH <=20% ALERT MINIMUM)
     # =========================================================================
     def render_inventory_view(self):
-        ctk.CTkLabel(self.content_area, text="Inventory Master & Stock Control",
-                     font=ctk.CTkFont(size=20, weight="bold")).pack(anchor="w", pady=(5, 5))
+        # 1. Header Bar
+        header_row = ctk.CTkFrame(self.content_area, fg_color="transparent")
+        header_row.pack(fill="x", pady=(5, 6), padx=5)
 
+        ctk.CTkLabel(header_row, text="Inventory Master & Stock Control",
+                     font=ctk.CTkFont(size=20, weight="bold")).pack(side="left")
+
+        if self.current_user['role'] == "Admin":
+            ctk.CTkButton(header_row, text="Bulk Import CSV", width=130, fg_color="#0F766E", hover_color="#115E59",
+                          command=self.handle_bulk_import_csv).pack(side="right", padx=(5, 0))
+            ctk.CTkButton(header_row, text="Sample CSV Template", width=150, fg_color="#4338CA",
+                          hover_color="#3730A3",
+                          command=self.handle_download_csv_template).pack(side="right", padx=5)
+
+        # 2. Warning Bar
         alerts = db.get_low_stock_alerts()
         if alerts:
             crit_count = sum(1 for a in alerts if a['stock_quantity'] <= a['reorder_level'] / 2)
             alert_bar = ctk.CTkFrame(self.content_area, fg_color="#7F1D1D" if crit_count > 0 else "#9A3412", height=32)
-            alert_bar.pack(fill="x", pady=(0, 5))
-            alert_txt = f"Stock Notice: {len(alerts)} item(s) below alert limit ({crit_count} Critical Low / Depleted)"
-            ctk.CTkLabel(alert_bar, text=alert_txt, font=ctk.CTkFont(size=12, weight="bold"), text_color="white").pack(side="left", padx=10)
+            alert_bar.pack(fill="x", pady=(0, 6), padx=5)
+            alert_txt = f"⚠ Stock Notice: {len(alerts)} item(s) below 20% Alert Limit ({crit_count} Critical Low / Depleted)"
+            ctk.CTkLabel(alert_bar, text=alert_txt, font=ctk.CTkFont(size=12, weight="bold"), text_color="white").pack(
+                side="left", padx=10)
 
-        top_bar = ctk.CTkFrame(self.content_area)
-        top_bar.pack(fill="x", pady=5)
+        # 3. Form Card for Adding New Products
+        form_card = ctk.CTkFrame(self.content_area)
+        form_card.pack(fill="x", pady=(0, 6), padx=5)
 
-        n_e = ctk.CTkEntry(top_bar, placeholder_text="Product Name", width=160)
-        n_e.pack(side="left", padx=3)
-        c_e = ctk.CTkEntry(top_bar, placeholder_text="Category", width=110)
-        c_e.pack(side="left", padx=3)
-        cp_e = ctk.CTkEntry(top_bar, placeholder_text="Cost (GHS)", width=80)
-        if self.current_user['role'] == "Admin": cp_e.pack(side="left", padx=3)
-        sp_e = ctk.CTkEntry(top_bar, placeholder_text="Selling (GHS)", width=80)
-        sp_e.pack(side="left", padx=3)
-        st_e = ctk.CTkEntry(top_bar, placeholder_text="Stock Qty", width=70)
-        st_e.pack(side="left", padx=3)
-        th_e = ctk.CTkEntry(top_bar, placeholder_text="Alert Min", width=70)
-        th_e.pack(side="left", padx=3)
-        th_e.insert(0, "5")
+        n_e = ctk.CTkEntry(form_card, placeholder_text="Product Name", width=180)
+        n_e.pack(side="left", padx=4, pady=6)
+
+        c_e = ctk.CTkEntry(form_card, placeholder_text="Category", width=120)
+        c_e.pack(side="left", padx=4, pady=6)
+
+        cp_e = ctk.CTkEntry(form_card, placeholder_text="Cost (GHS)", width=85)
+        if self.current_user['role'] == "Admin":
+            cp_e.pack(side="left", padx=4, pady=6)
+
+        sp_e = ctk.CTkEntry(form_card, placeholder_text="Selling (GHS)", width=85)
+        sp_e.pack(side="left", padx=4, pady=6)
+
+        st_e = ctk.CTkEntry(form_card, placeholder_text="Stock Qty", width=85)
+        st_e.pack(side="left", padx=4, pady=6)
 
         n_e.bind("<Return>", lambda e: c_e.focus_set())
         c_e.bind("<Return>", lambda e: (cp_e if self.current_user['role'] == "Admin" else sp_e).focus_set())
         if self.current_user['role'] == "Admin":
             cp_e.bind("<Return>", lambda e: sp_e.focus_set())
         sp_e.bind("<Return>", lambda e: st_e.focus_set())
-        st_e.bind("<Return>", lambda e: th_e.focus_set())
 
         def save_item():
             try:
                 cp = float(cp_e.get()) if self.current_user['role'] == "Admin" else 0.0
                 sp = float(sp_e.get())
                 st = float(st_e.get())
-                th = float(th_e.get().strip() or 5)
+                # Auto-calculate Alert Min as 20% of the initial batch stock
+                th = max(1.0, st * 0.20)
             except ValueError:
-                messagebox.showerror("Error", "Invalid numeric values.")
+                messagebox.showerror("Error", "Please provide valid numerical values.")
                 return
             conn = db.get_connection()
             try:
@@ -1470,9 +1842,8 @@ class MasterShopERP(ctk.CTk):
                 c_e.delete(0, 'end')
                 sp_e.delete(0, 'end')
                 st_e.delete(0, 'end')
-                th_e.delete(0, 'end')
-                th_e.insert(0, "5")
-                if self.current_user['role'] == "Admin": cp_e.delete(0, 'end')
+                if self.current_user['role'] == "Admin":
+                    cp_e.delete(0, 'end')
                 n_e.focus_set()
                 self.load_inventory_table(tv)
             except Exception as e:
@@ -1480,34 +1851,54 @@ class MasterShopERP(ctk.CTk):
             finally:
                 conn.close()
 
-        th_e.bind("<Return>", lambda e: save_item())
-        ctk.CTkButton(top_bar, text="+ Add Item", width=90, command=save_item).pack(side="left", padx=4)
+        st_e.bind("<Return>", lambda e: save_item())
+        ctk.CTkButton(form_card, text="+ Add Product", width=110, command=save_item).pack(side="left", padx=6, pady=6)
 
-        search_ent = ctk.CTkEntry(top_bar, placeholder_text="Search Inventory...", width=180)
-        search_ent.pack(side="right", padx=6)
+        # 4. Search Bar
+        search_bar = ctk.CTkFrame(self.content_area, fg_color="transparent")
+        search_bar.pack(fill="x", pady=(2, 4), padx=5)
+
+        search_ent = ctk.CTkEntry(search_bar, placeholder_text="Search inventory by name or category...", height=34)
+        search_ent.pack(fill="x")
         search_ent.bind("<KeyRelease>", lambda e: self.load_inventory_table(tv, search_ent.get().strip()))
 
-        cols = ("ID", "Name", "Category", "Cost Price", "Selling Price", "Stock Level", "Alert Min", "Status") if self.current_user[
-                                                                                               'role'] == "Admin" else (
-            "ID", "Name", "Category", "Selling Price", "Stock Level", "Alert Min", "Status")
-        tv = ttk.Treeview(self.content_area, columns=cols, show="headings", height=13)
+        # 5. Treeview Table Layout
+        cols = ("ID", "Name", "Category", "Cost Price", "Selling Price", "Stock Level", "% Left", "Alert Min (20%)",
+                "Status") if self.current_user['role'] == "Admin" else (
+            "ID", "Name", "Category", "Selling Price", "Stock Level", "% Left", "Alert Min (20%)", "Status")
+
+        tree_frame = ctk.CTkFrame(self.content_area)
+        tree_frame.pack(fill="both", expand=True, padx=5, pady=4)
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        tv = ttk.Treeview(tree_frame, columns=cols, show="headings", height=12)
         for c in cols:
             tv.heading(c, text=c)
             tv.column(c, width=105, anchor="center")
-        tv.column("Name", width=160, anchor="w")
-        tv.pack(fill="both", expand=True, pady=10)
+
+        tv.column("ID", width=45, anchor="center")
+        tv.column("Name", width=220, anchor="w")
+        tv.column("Category", width=130, anchor="w")
+        tv.column("% Left", width=85, anchor="center")
+        tv.grid(row=0, column=0, sticky="nsew")
+
+        sb = ttk.Scrollbar(tree_frame, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        sb.grid(row=0, column=1, sticky="ns")
 
         tv.tag_configure('critical', background='#FEE2E2', foreground='#991B1B')
         tv.tag_configure('warning', background='#FEF3C7', foreground='#92400E')
         tv.tag_configure('normal', background='#F0FDF4', foreground='#166534')
 
+        # 6. Action Control Bar
         ctrl_bar = ctk.CTkFrame(self.content_area)
-        ctrl_bar.pack(fill="x", pady=5)
+        ctrl_bar.pack(fill="x", pady=(4, 5), padx=5)
 
         def get_selected_p():
             sel = tv.selection()
             if not sel:
-                messagebox.showwarning("Select", "Select a product from the table.")
+                messagebox.showwarning("Select Row", "Please select a product from the table.")
                 return None
             return tv.item(sel[0])['values']
 
@@ -1523,10 +1914,11 @@ class MasterShopERP(ctk.CTk):
 
             modal = ctk.CTkToplevel(self)
             modal.title(f"Edit / Restock Item #{pid}")
-            modal.geometry("420x450")
+            modal.geometry("420x460")
             modal.grab_set()
 
-            ctk.CTkLabel(modal, text=f"Update Product: {p['name']}", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(15, 8))
+            ctk.CTkLabel(modal, text=f"Update Product: {p['name']}", font=ctk.CTkFont(size=16, weight="bold")).pack(
+                pady=(15, 8))
 
             en_name = ctk.CTkEntry(modal, placeholder_text="Product Name", width=280)
             en_name.insert(0, p['name'])
@@ -1549,27 +1941,25 @@ class MasterShopERP(ctk.CTk):
             en_sell.insert(0, f"{p['selling_price']:.2f}")
             en_sell.pack(pady=3)
 
-            ctk.CTkLabel(modal, text="Current Total Stock Quantity:", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=70)
+            ctk.CTkLabel(modal, text="New / Restocked Quantity (100% Base):", font=ctk.CTkFont(size=11)).pack(
+                anchor="w", padx=70)
             en_stock = ctk.CTkEntry(modal, placeholder_text="Stock Quantity", width=280)
             en_stock.insert(0, str(p['stock_quantity']))
             en_stock.pack(pady=3)
-
-            ctk.CTkLabel(modal, text="Alert Minimum Limit:", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=70)
-            en_alert = ctk.CTkEntry(modal, placeholder_text="Alert Min Limit", width=280)
-            en_alert.insert(0, str(p['reorder_level']))
-            en_alert.pack(pady=3)
 
             def save_update():
                 try:
                     cp = float(en_cost.get().strip()) if en_cost else p['cost_price']
                     sp = float(en_sell.get().strip())
                     stk = float(en_stock.get().strip())
-                    alert_lim = float(en_alert.get().strip() or 5)
+                    # Auto recalculate Alert Min as 20%
+                    alert_lim = max(1.0, stk * 0.20)
                 except ValueError:
                     messagebox.showerror("Invalid Input", "Please enter valid numerical values.")
                     return
 
-                ok, msg = db.update_product_info(pid, en_name.get().strip(), en_cat.get().strip(), cp, sp, stk, alert_lim)
+                ok, msg = db.update_product_info(pid, en_name.get().strip(), en_cat.get().strip(), cp, sp, stk,
+                                                 alert_lim)
                 if ok:
                     messagebox.showinfo("Success", msg)
                     modal.destroy()
@@ -1577,7 +1967,7 @@ class MasterShopERP(ctk.CTk):
                 else:
                     messagebox.showerror("Error", msg)
 
-            ctk.CTkButton(modal, text="Save Updates & Stock", width=280, height=38, fg_color="#059669",
+            ctk.CTkButton(modal, text="Save Updates & Restock", width=280, height=38, fg_color="#059669",
                           hover_color="#047857", command=save_update).pack(pady=15)
 
         tv.bind("<Double-1>", lambda e: open_edit_product_modal())
@@ -1590,14 +1980,16 @@ class MasterShopERP(ctk.CTk):
                 db.delete_product(pid)
                 self.load_inventory_table(tv)
 
-        ctk.CTkButton(ctrl_bar, text="Edit / Restock Item", width=140, fg_color="#2563EB", hover_color="#1D4ED8",
+        ctk.CTkButton(ctrl_bar, text="Edit / Restock Item", width=150, fg_color="#2563EB", hover_color="#1D4ED8",
                       command=open_edit_product_modal).pack(side="left", padx=5)
-        ctk.CTkButton(ctrl_bar, text="Delete Selected Item", fg_color="#DC2626", hover_color="#991B1B",
+        ctk.CTkButton(ctrl_bar, text="Delete Selected Item", width=150, fg_color="#DC2626", hover_color="#991B1B",
                       command=delete_item).pack(side="left", padx=5)
+
         self.load_inventory_table(tv)
 
     def load_inventory_table(self, tv, query=""):
-        for r in tv.get_children(): tv.delete(r)
+        for r in tv.get_children():
+            tv.delete(r)
         conn = db.get_connection()
         if query:
             rows = conn.execute("SELECT * FROM products WHERE name LIKE ? OR category LIKE ? ORDER BY name ASC",
@@ -1605,51 +1997,220 @@ class MasterShopERP(ctk.CTk):
         else:
             rows = conn.execute("SELECT * FROM products ORDER BY name ASC").fetchall()
         conn.close()
+
         for p in rows:
             stk = p['stock_quantity']
-            thresh = p['reorder_level']
-            if stk <= thresh / 2:
-                status = "CRITICAL"
+            thresh = p['reorder_level'] if p['reorder_level'] > 0 else 1.0
+
+            # Baseline 100% capacity derived from the 20% alert threshold
+            base_capacity = thresh * 5.0
+            percent_left = min(100.0, (stk / base_capacity) * 100) if base_capacity > 0 else 0.0
+
+            if percent_left <= 10.0 or stk <= thresh / 2:
+                status = "CRITICAL LOW"
                 tag = 'critical'
-            elif stk <= thresh:
-                status = "LOW STOCK"
+            elif percent_left <= 20.0 or stk <= thresh:
+                status = "LOW STOCK (ALERT)"
                 tag = 'warning'
             else:
-                status = "NORMAL"
+                status = "HEALTHY"
                 tag = 'normal'
 
+            stock_lvl_display = f"{stk:.0f}" if stk.is_integer() else f"{stk:.1f}"
+            pct_left_display = f"{percent_left:.0f}%"
+            alert_min_display = f"{thresh:.0f} (20%)"
+
             if self.current_user['role'] == "Admin":
-                tv.insert("", "end", values=(p['id'], p['name'], p['category'], f"GHS {p['cost_price']:.2f}",
-                                             f"GHS {p['selling_price']:.2f}", stk, thresh, status), tags=(tag,))
+                tv.insert("", "end", values=(
+                    p['id'],
+                    p['name'],
+                    p['category'],
+                    f"GHS {p['cost_price']:.2f}",
+                    f"GHS {p['selling_price']:.2f}",
+                    stock_lvl_display,
+                    pct_left_display,
+                    alert_min_display,
+                    status
+                ), tags=(tag,))
             else:
-                tv.insert("", "end", values=(p['id'], p['name'], p['category'], f"GHS {p['selling_price']:.2f}",
-                                             stk, thresh, status), tags=(tag,))
+                tv.insert("", "end", values=(
+                    p['id'],
+                    p['name'],
+                    p['category'],
+                    f"GHS {p['selling_price']:.2f}",
+                    stock_lvl_display,
+                    pct_left_display,
+                    alert_min_display,
+                    status
+                ), tags=(tag,))
+
+    def handle_bulk_import_csv(self):
+        file_path = filedialog.askopenfilename(
+            title="Select Products CSV File to Import",
+            filetypes=[("CSV Files", "*.csv")]
+        )
+        if not file_path:
+            return
+
+        ok, msg = db.bulk_import_products_from_csv(file_path)
+        if ok:
+            messagebox.showinfo("Import Success", msg)
+            self.switch_view("INV")
+        else:
+            messagebox.showerror("Import Error", msg)
+
+    def handle_download_csv_template(self):
+        file_path = filedialog.asksaveasfilename(
+            title="Save Sample CSV Template",
+            defaultextension=".csv",
+            filetypes=[("CSV Files", "*.csv")],
+            initialfile="YOMES_Inventory_Import_Template.csv"
+        )
+        if not file_path:
+            return
+        try:
+            db.generate_sample_csv_template(file_path)
+            messagebox.showinfo("Template Saved",
+                                f"Sample template saved successfully to:\n{file_path}\n\nYou can fill it in Excel or Notepad and import it directly!")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
 
     # =========================================================================
-    # 8. ANALYTICS (ADMIN ONLY)
+    # 8. BACKUP & RESTORE MODAL (ADMIN ONLY)
+    # =========================================================================
+    def show_backup_restore_modal(self):
+        modal = ctk.CTkToplevel(self)
+        modal.title("Database Backup & Safety Center")
+        modal.geometry("520x400")
+        modal.grab_set()
+
+        ctk.CTkLabel(modal, text="Enterprise Database Backup & Restore",
+                     font=ctk.CTkFont(size=17, weight="bold")).pack(pady=(20, 5))
+        ctk.CTkLabel(modal, text="Create instant offline snapshots or restore previous database archives.",
+                     font=ctk.CTkFont(size=12), text_color="gray").pack(pady=(0, 20))
+
+        # Backup Box
+        b_box = ctk.CTkFrame(modal)
+        b_box.pack(fill="x", padx=25, pady=8)
+        ctk.CTkLabel(b_box, text="Backup Database Snapshot", font=ctk.CTkFont(size=14, weight="bold")).pack(
+            anchor="w", padx=15, pady=(10, 2))
+        ctk.CTkLabel(b_box, text="Saves a complete timestamped copy of all inventory, sales, and debt ledgers.",
+                     font=ctk.CTkFont(size=11), text_color="gray").pack(anchor="w", padx=15, pady=(0, 10))
+
+        def execute_backup():
+            folder = filedialog.askdirectory(title="Select Folder or USB Drive to Save Backup")
+            if not folder:
+                return
+            ok, msg = db.create_database_backup(folder)
+            if ok:
+                messagebox.showinfo("Backup Successful", msg)
+            else:
+                messagebox.showerror("Backup Error", msg)
+
+        ctk.CTkButton(b_box, text="Create Backup Snapshot Now", height=36, fg_color="#0F766E", hover_color="#115E59",
+                      command=execute_backup).pack(fill="x", padx=15, pady=(0, 15))
+
+        # Restore Box
+        r_box = ctk.CTkFrame(modal)
+        r_box.pack(fill="x", padx=25, pady=8)
+        ctk.CTkLabel(r_box, text="Restore Database From Archive", font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color="#EF4444").pack(anchor="w", padx=15, pady=(10, 2))
+        ctk.CTkLabel(r_box, text="Restores all shop records from a previously generated .db backup file.",
+                     font=ctk.CTkFont(size=11), text_color="gray").pack(anchor="w", padx=15, pady=(0, 10))
+
+        def execute_restore():
+            file_path = filedialog.askopenfilename(
+                title="Select Backup Database File (.db)",
+                filetypes=[("Database Files", "*.db")]
+            )
+            if not file_path:
+                return
+
+            if messagebox.askyesno("Restore Warning",
+                                   "Are you sure you want to replace current shop records with this backup?\n\n(A safety copy of your current database will be saved automatically)."):
+                ok, msg = db.restore_database_backup(file_path)
+                if ok:
+                    messagebox.showinfo("Restore Successful", msg)
+                    modal.destroy()
+                    self.load_main_dashboard()
+                else:
+                    messagebox.showerror("Restore Error", msg)
+
+        ctk.CTkButton(r_box, text="Select & Restore Backup (.db)", height=36, fg_color="#DC2626", hover_color="#991B1B",
+                      command=execute_restore).pack(fill="x", padx=15, pady=(0, 15))
+
+    # =========================================================================
+    # 9. ANALYTICS (WITH EMBEDDED REVENUE GRAPH)
     # =========================================================================
     def render_analytics_view(self):
-        ctk.CTkLabel(self.content_area, text="Executive Financial Analytics",
-                     font=ctk.CTkFont(size=20, weight="bold")).pack(anchor="w", pady=10)
+        ctk.CTkLabel(self.content_area, text="Executive Financial Analytics & Performance",
+                     font=ctk.CTkFont(size=20, weight="bold")).pack(anchor="w", pady=(5, 10))
         conn = db.get_connection()
         sales_rev = conn.execute("SELECT COALESCE(SUM(total_amount), 0) as rev FROM sales").fetchone()['rev']
         total_profit = conn.execute("SELECT COALESCE(SUM(line_profit), 0) as profit FROM sale_items").fetchone()[
             'profit']
         total_debt = conn.execute("SELECT COALESCE(SUM(current_debt), 0) as debt FROM customers").fetchone()['debt']
+
+        daily_trends = []
+        for i in range(6, -1, -1):
+            day_target = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+            day_label = (datetime.now() - timedelta(days=i)).strftime("%b %d")
+            day_sales = \
+            conn.execute("SELECT COALESCE(SUM(total_amount), 0) as total FROM sales WHERE DATE(sale_date) = DATE(?)",
+                         (day_target,)).fetchone()['total']
+            daily_trends.append((day_label, day_sales))
         conn.close()
 
         cards = ctk.CTkFrame(self.content_area)
-        cards.pack(fill="x", pady=20)
+        cards.pack(fill="x", pady=10)
         for idx, (title, val, color) in enumerate([
             ("Total Gross Revenue", f"GHS {sales_rev:,.2f}", "#2563EB"),
             ("Gross Estimated Profit", f"GHS {total_profit:,.2f}", "#059669"),
             ("Total Outstanding Debtors", f"GHS {total_debt:,.2f}", "#DC2626")
         ]):
             c = ctk.CTkFrame(cards, fg_color=color, corner_radius=10)
-            c.grid(row=0, column=idx, padx=15, pady=10, sticky="nsew")
+            c.grid(row=0, column=idx, padx=10, pady=5, sticky="nsew")
             cards.grid_columnconfigure(idx, weight=1)
-            ctk.CTkLabel(c, text=title, font=ctk.CTkFont(size=14, weight="bold"), text_color="white").pack(pady=(15, 5))
-            ctk.CTkLabel(c, text=val, font=ctk.CTkFont(size=20, weight="bold"), text_color="white").pack(pady=(0, 15))
+            ctk.CTkLabel(c, text=title, font=ctk.CTkFont(size=13, weight="bold"), text_color="white").pack(pady=(12, 2))
+            ctk.CTkLabel(c, text=val, font=ctk.CTkFont(size=18, weight="bold"), text_color="white").pack(pady=(0, 12))
+
+        graph_frame = ctk.CTkFrame(self.content_area)
+        graph_frame.pack(fill="both", expand=True, pady=(10, 5))
+
+        ctk.CTkLabel(graph_frame, text="7-Day Store Revenue Velocity (GHS)",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=15, pady=(10, 0))
+
+        labels = [d[0] for d in daily_trends]
+        values = [d[1] for d in daily_trends]
+
+        is_dark = ctk.get_appearance_mode() == "Dark"
+        bg_color = "#2A2D2E" if is_dark else "#F8FAFC"
+        text_color = "white" if is_dark else "#1E293B"
+
+        fig = Figure(figsize=(8, 3.4), dpi=100, facecolor=bg_color)
+        ax = fig.add_subplot(111)
+        ax.set_facecolor(bg_color)
+
+        bars = ax.bar(labels, values, color="#3B82F6", width=0.5, edgecolor="#1D4ED8")
+        ax.plot(labels, values, color="#10B981", marker="o", linewidth=2)
+
+        for bar in bars:
+            height = bar.get_height()
+            if height > 0:
+                ax.annotate(f"{height:.0f}",
+                            xy=(bar.get_x() + bar.get_width() / 2, height),
+                            xytext=(0, 3),
+                            textcoords="offset points",
+                            ha='center', va='bottom', fontsize=8, color=text_color, fontweight='bold')
+
+        ax.tick_params(colors=text_color, labelsize=9)
+        for spine in ax.spines.values():
+            spine.set_color(text_color)
+        ax.grid(axis='y', linestyle='--', alpha=0.3, color=text_color)
+
+        canvas = FigureCanvasTkAgg(fig, master=graph_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=(5, 10))
 
 
 if __name__ == "__main__":

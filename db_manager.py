@@ -1,27 +1,27 @@
 # db_manager.py
 import sqlite3
-import hashlib
 import os
+import sys
+import shutil
+import csv
 from datetime import datetime
 
-DB_NAME = "yomes_enterprise.db"
+
+def get_db_path(filename="yomes_enterprise.db"):
+    """Anchors database file directly alongside the application executable."""
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, filename)
 
 
-def hash_password(password: str, salt: str = None) -> tuple[str, str]:
-    if not salt:
-        salt = os.urandom(16).hex()
-    hashed = hashlib.sha256((password + salt).encode('utf-8')).hexdigest()
-    return hashed, salt
-
-
-def verify_password(password: str, hashed: str, salt: str) -> bool:
-    return hashlib.sha256((password + salt).encode('utf-8')).hexdigest() == hashed
+DB_NAME = get_db_path("yomes_enterprise.db")
 
 
 def get_connection():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
 
@@ -29,177 +29,186 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # 1. Users / Staff Accounts
+    # Users Table
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        full_name TEXT NOT NULL,
-        username TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        salt TEXT NOT NULL,
-        role TEXT CHECK(role IN ('Admin', 'Storekeeper')) NOT NULL,
-        status TEXT DEFAULT 'Active' CHECK(status IN ('Active', 'Disabled')),
-        must_change_password INTEGER DEFAULT 1,
-        security_question TEXT,
-        security_answer_hash TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            full_name TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'Storekeeper',
+            status TEXT NOT NULL DEFAULT 'Active',
+            must_change_password INTEGER DEFAULT 0,
+            security_question TEXT,
+            security_answer TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
     """)
 
-    # 2. Inventory / Products
+    # Customers Table
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS products (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        category TEXT NOT NULL,
-        cost_price REAL NOT NULL,
-        selling_price REAL NOT NULL,
-        stock_quantity REAL DEFAULT 0,
-        reorder_level REAL DEFAULT 5,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
+        CREATE TABLE IF NOT EXISTS customers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            address TEXT,
+            current_debt REAL DEFAULT 0.0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
     """)
 
-    # 3. Debtors / Customers
+    # Products Table
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS customers (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        phone TEXT UNIQUE NOT NULL,
-        address TEXT,
-        credit_limit REAL DEFAULT 0.00,
-        current_debt REAL DEFAULT 0.00,
-        notes TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            category TEXT NOT NULL,
+            cost_price REAL DEFAULT 0.0,
+            selling_price REAL NOT NULL,
+            stock_quantity REAL NOT NULL DEFAULT 0.0,
+            reorder_level REAL NOT NULL DEFAULT 5.0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
     """)
 
-    # 4. Sales Header
+    # Sales Master Table
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS sales (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        receipt_no TEXT UNIQUE NOT NULL,
-        customer_id INTEGER,
-        payment_method TEXT NOT NULL,
-        subtotal REAL NOT NULL,
-        discount REAL DEFAULT 0.00,
-        total_amount REAL NOT NULL,
-        amount_paid REAL NOT NULL,
-        balance_due REAL DEFAULT 0.00,
-        user_id INTEGER NOT NULL,
-        sale_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
-    );
+        CREATE TABLE IF NOT EXISTS sales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            receipt_no TEXT UNIQUE NOT NULL,
+            customer_id INTEGER,
+            user_id INTEGER,
+            payment_method TEXT NOT NULL,
+            total_amount REAL NOT NULL,
+            amount_paid REAL NOT NULL,
+            balance_due REAL NOT NULL,
+            sale_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (customer_id) REFERENCES customers(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
     """)
 
-    # 5. Sale Line Items
+    # Sale Items Table
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS sale_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        sale_id INTEGER NOT NULL,
-        product_id INTEGER,
-        quantity REAL NOT NULL,
-        unit_cost REAL NOT NULL,
-        unit_price REAL NOT NULL,
-        line_total REAL NOT NULL,
-        line_profit REAL NOT NULL,
-        FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE,
-        FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
-    );
+        CREATE TABLE IF NOT EXISTS sale_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sale_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            quantity REAL NOT NULL,
+            cost_price REAL NOT NULL,
+            selling_price REAL NOT NULL,
+            unit_price REAL NOT NULL,
+            line_total REAL NOT NULL,
+            line_profit REAL NOT NULL,
+            FOREIGN KEY (sale_id) REFERENCES sales(id),
+            FOREIGN KEY (product_id) REFERENCES products(id)
+        )
     """)
 
-    # 6. Debt Audit Log
+    # Customer Installment Payments Table
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS debt_adjustments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        customer_id INTEGER NOT NULL,
-        old_debt REAL NOT NULL,
-        new_debt REAL NOT NULL,
-        adjustment_type TEXT NOT NULL,
-        reason TEXT,
-        adjusted_by INTEGER NOT NULL,
-        adjustment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE,
-        FOREIGN KEY (adjusted_by) REFERENCES users(id)
-    );
+        CREATE TABLE IF NOT EXISTS customer_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            amount_paid REAL NOT NULL,
+            payment_method TEXT NOT NULL,
+            balance_before REAL NOT NULL,
+            balance_after REAL NOT NULL,
+            payment_note TEXT,
+            received_by INTEGER,
+            payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (customer_id) REFERENCES customers(id),
+            FOREIGN KEY (received_by) REFERENCES users(id)
+        )
     """)
 
-    # 7. Customer Installment Payments
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS customer_payments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        customer_id INTEGER NOT NULL,
-        amount_paid REAL NOT NULL,
-        payment_method TEXT NOT NULL,
-        payment_note TEXT,
-        balance_before REAL NOT NULL,
-        balance_after REAL NOT NULL,
-        received_by INTEGER NOT NULL,
-        payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE,
-        FOREIGN KEY (received_by) REFERENCES users(id)
-    );
-    """)
-
-    # Create Default Admin
-    cursor.execute("SELECT COUNT(*) as count FROM users")
-    if cursor.fetchone()['count'] == 0:
-        h, s = hash_password("admin123")
-        ans_h, _ = hash_password("accra", s)
+    # Ensure Admin exists and always has active password recovery
+    admin = cursor.execute("SELECT * FROM users WHERE LOWER(username) = 'admin'").fetchone()
+    if not admin:
         cursor.execute("""
-            INSERT INTO users (full_name, username, password_hash, salt, role, status, must_change_password, security_question, security_answer_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, ("System Administrator", "admin", h, s, "Admin", "Active", 0, "What is your default company city?", ans_h))
+            INSERT INTO users (username, password, full_name, role, status, must_change_password, security_question, security_answer)
+            VALUES ('admin', 'admin123', 'System Administrator', 'Admin', 'Active', 0, 'What is your favorite electrical brand?', 'YOMES')
+        """)
+    else:
+        if not admin['security_question'] or not admin['security_answer']:
+            cursor.execute("""
+                UPDATE users 
+                SET security_question = 'What is your favorite electrical brand?',
+                    security_answer = 'YOMES'
+                WHERE LOWER(username) = 'admin'
+            """)
 
     conn.commit()
     conn.close()
 
 
-# --- Auth Operations ---
-
+# =============================================================================
+# AUTHENTICATION & ACCESS CONTROL
+# =============================================================================
 def authenticate_user(username, password):
     conn = get_connection()
-    user = conn.execute("SELECT * FROM users WHERE username = ? AND status = 'Active'", (username,)).fetchone()
+    user = conn.execute(
+        "SELECT * FROM users WHERE LOWER(username) = LOWER(?) AND password = ? AND status = 'Active'",
+        (username.strip(), password)
+    ).fetchone()
     conn.close()
-    if user and verify_password(password, user['password_hash'], user['salt']):
-        return dict(user)
-    return None
+    return dict(user) if user else None
 
 
-def update_user_password(user_id, new_password, security_q=None, security_ans=None):
-    h, s = hash_password(new_password)
+def update_user_password(user_id, new_password, sec_q=None, sec_a=None):
     conn = get_connection()
-    cursor = conn.cursor()
-    if security_q and security_ans:
-        ans_h, _ = hash_password(security_ans.strip().lower(), s)
-        cursor.execute("""
-            UPDATE users 
-            SET password_hash = ?, salt = ?, must_change_password = 0, security_question = ?, security_answer_hash = ?
-            WHERE id = ?
-        """, (h, s, security_q, ans_h, user_id))
-    else:
-        cursor.execute("""
-            UPDATE users 
-            SET password_hash = ?, salt = ?, must_change_password = 0 
-            WHERE id = ?
-        """, (h, s, user_id))
-    conn.commit()
-    conn.close()
+    try:
+        if sec_q and sec_a:
+            conn.execute("""
+                UPDATE users 
+                SET password = ?, security_question = ?, security_answer = ?, must_change_password = 0 
+                WHERE id = ?
+            """, (new_password, sec_q, sec_a, user_id))
+        else:
+            conn.execute("""
+                UPDATE users 
+                SET password = ?, must_change_password = 0 
+                WHERE id = ?
+            """, (new_password, user_id))
+        conn.commit()
+        return True, "Password updated successfully."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
+
+
+def reset_password_with_security(username, sec_answer, new_password):
+    conn = get_connection()
+    try:
+        user = conn.execute("SELECT * FROM users WHERE LOWER(username) = LOWER(?)", (username.strip(),)).fetchone()
+        if not user:
+            return False, "User account not found."
+        if not user['security_answer'] or user['security_answer'].strip().lower() != sec_answer.strip().lower():
+            return False, "Security answer does not match records."
+        if len(new_password) < 4:
+            return False, "Password must be at least 4 characters long."
+
+        conn.execute("UPDATE users SET password = ?, must_change_password = 0 WHERE id = ?", (new_password, user['id']))
+        conn.commit()
+        return True, "Password successfully reset! You can now sign in."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
 
 
 def create_storekeeper(full_name, username, temp_password):
-    h, s = hash_password(temp_password)
     conn = get_connection()
     try:
         conn.execute("""
-            INSERT INTO users (full_name, username, password_hash, salt, role, status, must_change_password)
-            VALUES (?, ?, ?, ?, 'Storekeeper', 'Active', 1)
-        """, (full_name, username, h, s))
+            INSERT INTO users (username, password, full_name, role, status, must_change_password)
+            VALUES (?, ?, ?, 'Storekeeper', 'Active', 1)
+        """, (username.strip(), temp_password, full_name.strip()))
         conn.commit()
-        return True, "Storekeeper account created successfully."
+        return True, "Storekeeper created with mandatory first-login setup."
     except sqlite3.IntegrityError:
-        return False, "Username is already in use."
+        return False, "Username is already registered."
     except Exception as e:
         return False, str(e)
     finally:
@@ -209,149 +218,38 @@ def create_storekeeper(full_name, username, temp_password):
 def delete_user(user_id):
     conn = get_connection()
     try:
-        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.execute("DELETE FROM users WHERE id = ? AND role != 'Admin'", (user_id,))
         conn.commit()
-        return True, "User account deleted."
+        return True, "Staff account deleted."
     except Exception as e:
         return False, str(e)
     finally:
         conn.close()
 
 
-def reset_password_with_security(username, security_answer, new_password):
-    conn = get_connection()
-    user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    if not user:
-        conn.close()
-        return False, "User not found."
-
-    ans_h, _ = hash_password(security_answer.strip().lower(), user['salt'])
-    if ans_h != user['security_answer_hash']:
-        conn.close()
-        return False, "Incorrect answer to security question."
-
-    new_h, new_s = hash_password(new_password)
-    conn.execute("UPDATE users SET password_hash = ?, salt = ?, must_change_password = 0 WHERE id = ?",
-                 (new_h, new_s, user['id']))
-    conn.commit()
-    conn.close()
-    return True, "Password reset successfully."
-
-
-# --- Customer & Debt Operations ---
-
-def update_customer_info(cust_id, name, phone, address):
-    conn = get_connection()
-    try:
-        conn.execute("UPDATE customers SET name = ?, phone = ?, address = ? WHERE id = ?",
-                     (name, phone, address, cust_id))
-        conn.commit()
-        return True, "Customer details updated."
-    except Exception as e:
-        return False, str(e)
-    finally:
-        conn.close()
-
-
-def adjust_customer_debt(cust_id, new_debt, reason, user_id, adj_type="MANUAL_EDIT"):
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("BEGIN TRANSACTION;")
-        old_debt = cursor.execute("SELECT current_debt FROM customers WHERE id = ?", (cust_id,)).fetchone()[
-            'current_debt']
-        cursor.execute("UPDATE customers SET current_debt = ? WHERE id = ?", (new_debt, cust_id))
-        cursor.execute("""
-            INSERT INTO debt_adjustments (customer_id, old_debt, new_debt, adjustment_type, reason, adjusted_by)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (cust_id, old_debt, new_debt, adj_type, reason, user_id))
-        conn.commit()
-        return True, "Debt updated successfully."
-    except Exception as e:
-        conn.rollback()
-        return False, str(e)
-    finally:
-        conn.close()
-
-
-def record_customer_installment(customer_id, amount_paid, payment_method, note, user_id):
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("BEGIN TRANSACTION;")
-        cust = cursor.execute("SELECT current_debt FROM customers WHERE id = ?", (customer_id,)).fetchone()
-        if not cust:
-            return False, "Customer not found."
-
-        balance_before = cust['current_debt']
-        if amount_paid <= 0:
-            return False, "Payment amount must be greater than zero."
-
-        balance_after = max(0.0, balance_before - amount_paid)
-
-        cursor.execute("UPDATE customers SET current_debt = ? WHERE id = ?", (balance_after, customer_id))
-
-        cursor.execute("""
-            INSERT INTO customer_payments (customer_id, amount_paid, payment_method, payment_note, balance_before, balance_after, received_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (customer_id, amount_paid, payment_method, note, balance_before, balance_after, user_id))
-
-        conn.commit()
-        return True, "Payment recorded and debt deducted successfully."
-    except Exception as e:
-        conn.rollback()
-        return False, str(e)
-    finally:
-        conn.close()
-
-
-def get_customer_payments(customer_id):
-    conn = get_connection()
-    rows = conn.execute("""
-        SELECT cp.*, u.full_name as receiver_name 
-        FROM customer_payments cp
-        JOIN users u ON cp.received_by = u.id
-        WHERE cp.customer_id = ?
-        ORDER BY cp.payment_date DESC
-    """, (customer_id,)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def delete_customer(cust_id):
-    conn = get_connection()
-    try:
-        conn.execute("DELETE FROM customers WHERE id = ?", (cust_id,))
-        conn.commit()
-        return True, "Customer record deleted."
-    except Exception as e:
-        return False, str(e)
-    finally:
-        conn.close()
-
-
-# --- Product & Stock Operations ---
-
-def update_product_info(prod_id, name, category, cost_price, selling_price, stock_quantity, reorder_level):
+# =============================================================================
+# INVENTORY, BULK IMPORT & TEMPLATES
+# =============================================================================
+def update_product_info(product_id, name, category, cost_price, selling_price, stock_quantity, reorder_level):
     conn = get_connection()
     try:
         conn.execute("""
-            UPDATE products 
+            UPDATE products
             SET name = ?, category = ?, cost_price = ?, selling_price = ?, stock_quantity = ?, reorder_level = ?
             WHERE id = ?
-        """, (name, category, cost_price, selling_price, stock_quantity, reorder_level, prod_id))
+        """, (name.strip(), category.strip(), cost_price, selling_price, stock_quantity, reorder_level, product_id))
         conn.commit()
-        return True, "Product updated successfully."
+        return True, "Product details and stock levels updated."
     except Exception as e:
         return False, str(e)
     finally:
         conn.close()
 
 
-def delete_product(prod_id):
+def delete_product(product_id):
     conn = get_connection()
     try:
-        conn.execute("DELETE FROM products WHERE id = ?", (prod_id,))
+        conn.execute("DELETE FROM products WHERE id = ?", (product_id,))
         conn.commit()
         return True, "Product deleted."
     except Exception as e:
@@ -362,51 +260,175 @@ def delete_product(prod_id):
 
 def get_low_stock_alerts():
     conn = get_connection()
-    rows = conn.execute("""
-        SELECT id, name, stock_quantity, reorder_level 
-        FROM products 
+    alerts = conn.execute("""
+        SELECT * FROM products 
         WHERE stock_quantity <= reorder_level 
         ORDER BY stock_quantity ASC
     """).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return [dict(a) for a in alerts]
 
 
+def bulk_import_products_from_csv(file_path):
+    conn = get_connection()
+    cursor = conn.cursor()
+    inserted_count = 0
+    updated_count = 0
+    errors = []
+
+    try:
+        with open(file_path, mode="r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            reader.fieldnames = [fn.strip().lower().replace(" ", "_") for fn in reader.fieldnames]
+
+            required_cols = {"name", "category", "cost_price", "selling_price", "stock_quantity"}
+            if not required_cols.issubset(set(reader.fieldnames)):
+                missing = required_cols - set(reader.fieldnames)
+                return False, f"Missing required columns in CSV: {', '.join(missing)}"
+
+            cursor.execute("BEGIN TRANSACTION")
+            for line_no, row in enumerate(reader, start=2):
+                name = row.get("name", "").strip()
+                category = row.get("category", "").strip() or "General"
+
+                if not name:
+                    continue
+
+                try:
+                    cp = float(row.get("cost_price", 0) or 0.0)
+                    sp = float(row.get("selling_price", 0) or 0.0)
+                    qty = float(row.get("stock_quantity", 0) or 0.0)
+                    # Automatically calculate 20% alert threshold if not specified
+                    alert_min = float(row.get("reorder_level", max(1.0, qty * 0.20)) or max(1.0, qty * 0.20))
+                except ValueError:
+                    errors.append(f"Row {line_no}: Invalid numeric values for '{name}'")
+                    continue
+
+                existing = cursor.execute("SELECT id FROM products WHERE LOWER(name) = LOWER(?)", (name,)).fetchone()
+                if existing:
+                    cursor.execute("""
+                        UPDATE products
+                        SET category = ?, cost_price = ?, selling_price = ?, stock_quantity = stock_quantity + ?, reorder_level = ?
+                        WHERE id = ?
+                    """, (category, cp, sp, qty, alert_min, existing['id']))
+                    updated_count += 1
+                else:
+                    cursor.execute("""
+                        INSERT INTO products (name, category, cost_price, selling_price, stock_quantity, reorder_level)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (name, category, cp, sp, qty, alert_min))
+                    inserted_count += 1
+
+            conn.commit()
+
+        msg = f"Bulk Import Completed!\n\n- New Items Added: {inserted_count}\n- Existing Items Restocked: {updated_count}"
+        if errors:
+            msg += f"\n\nWarnings:\n" + "\n".join(errors[:5])
+        return True, msg
+
+    except Exception as e:
+        conn.rollback()
+        return False, f"Import Failed: {str(e)}"
+    finally:
+        conn.close()
+
+
+def generate_sample_csv_template(file_path):
+    sample_data = [
+        ["name", "category", "cost_price", "selling_price", "stock_quantity", "reorder_level"],
+        ["1.5mm Single Core Cable (Pure Copper)", "Cables & Wiring", 120.00, 150.00, 200, 40],
+        ["2.5mm Twin with Earth Cable 100m", "Cables & Wiring", 310.00, 360.00, 50, 10],
+        ["13A Double Switch Socket (White)", "Sockets & Switches", 18.00, 25.00, 100, 20],
+        ["18W LED Ceiling Surface Panel Light", "Lighting & Bulbs", 28.00, 40.00, 80, 16],
+        ["63A Double Pole Main Breaker", "Distribution & Breakers", 45.00, 65.00, 30, 6]
+    ]
+    with open(file_path, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerows(sample_data)
+
+
+# =============================================================================
+# BACKUP & RESTORE
+# =============================================================================
+def create_database_backup(destination_folder):
+    if not os.path.exists(DB_NAME):
+        return False, "Active database file not found."
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_filename = f"YOMES_DB_Backup_{timestamp}.db"
+        dest_path = os.path.join(destination_folder, backup_filename)
+
+        conn = get_connection()
+        conn.execute("PRAGMA wal_checkpoint(FULL)")
+        conn.close()
+
+        shutil.copy2(DB_NAME, dest_path)
+        return True, f"Database backup saved successfully to:\n{dest_path}"
+    except Exception as e:
+        return False, str(e)
+
+
+def restore_database_backup(backup_file_path):
+    if not os.path.exists(backup_file_path):
+        return False, "Selected backup file does not exist."
+    try:
+        test_conn = sqlite3.connect(backup_file_path)
+        table_test = test_conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'").fetchone()
+        test_conn.close()
+
+        if not table_test:
+            return False, "The selected file is not a valid YOMES ERP backup database."
+
+        if os.path.exists(DB_NAME):
+            shutil.copy2(DB_NAME, f"{DB_NAME}.safety_backup")
+
+        shutil.copy2(backup_file_path, DB_NAME)
+        return True, "Database successfully restored. Please restart the application."
+    except Exception as e:
+        return False, f"Restore failed: {str(e)}"
+
+
+# =============================================================================
+# SALES TRANSACTIONS & DEBTORS
+# =============================================================================
 def process_sale_transaction(receipt_no, customer_id, payment_method, cart_items, total_amount, amount_paid,
                              balance_due, user_id):
     conn = get_connection()
     cursor = conn.cursor()
-    low_stock_warnings = []
     try:
-        cursor.execute("BEGIN TRANSACTION;")
+        cursor.execute("BEGIN TRANSACTION")
 
         cursor.execute("""
-            INSERT INTO sales (receipt_no, customer_id, payment_method, subtotal, discount, total_amount, amount_paid, balance_due, user_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (receipt_no, customer_id, payment_method, total_amount, 0.0, total_amount, amount_paid, balance_due,
-              user_id))
-
+            INSERT INTO sales (receipt_no, customer_id, user_id, payment_method, total_amount, amount_paid, balance_due)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (receipt_no, customer_id, user_id, payment_method, total_amount, amount_paid, balance_due))
         sale_id = cursor.lastrowid
 
+        low_stock_warnings = []
         for item in cart_items:
             cursor.execute("""
-                INSERT INTO sale_items (sale_id, product_id, quantity, unit_cost, unit_price, line_total, line_profit)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (sale_id, item['id'], item['qty'], item['cost_price'], item['selling_price'], item['line_total'],
-                  item['line_profit']))
+                INSERT INTO sale_items (sale_id, product_id, quantity, cost_price, selling_price, unit_price, line_total, line_profit)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (sale_id, item['id'], item['qty'], item['cost_price'], item['selling_price'], item['selling_price'],
+                  item['line_total'], item['line_profit']))
 
-            cursor.execute("UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?",
-                           (item['qty'], item['id']))
+            cursor.execute("""
+                UPDATE products
+                SET stock_quantity = stock_quantity - ?
+                WHERE id = ?
+            """, (item['qty'], item['id']))
 
-            # Recheck stock level vs alert threshold
-            p_data = cursor.execute("SELECT name, stock_quantity, reorder_level FROM products WHERE id = ?",
-                                    (item['id'],)).fetchone()
-            if p_data and p_data['stock_quantity'] <= p_data['reorder_level']:
-                low_stock_warnings.append(dict(p_data))
+            prod = cursor.execute("SELECT name, stock_quantity, reorder_level FROM products WHERE id = ?",
+                                  (item['id'],)).fetchone()
+            if prod and prod['stock_quantity'] <= prod['reorder_level']:
+                low_stock_warnings.append(dict(prod))
 
         if customer_id and balance_due > 0:
-            cursor.execute("UPDATE customers SET current_debt = current_debt + ? WHERE id = ?",
-                           (balance_due, customer_id))
+            cursor.execute("""
+                UPDATE customers
+                SET current_debt = current_debt + ?
+                WHERE id = ?
+            """, (balance_due, customer_id))
 
         conn.commit()
         return True, (sale_id, low_stock_warnings)
@@ -415,3 +437,82 @@ def process_sale_transaction(receipt_no, customer_id, payment_method, cart_items
         return False, str(e)
     finally:
         conn.close()
+
+
+def update_customer_info(customer_id, name, phone, address):
+    conn = get_connection()
+    try:
+        conn.execute("""
+            UPDATE customers
+            SET name = ?, phone = ?, address = ?
+            WHERE id = ?
+        """, (name.strip(), phone.strip(), address.strip(), customer_id))
+        conn.commit()
+        return True, "Customer details updated."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
+
+
+def delete_customer(customer_id):
+    conn = get_connection()
+    try:
+        cust = conn.execute("SELECT current_debt FROM customers WHERE id = ?", (customer_id,)).fetchone()
+        if cust and cust['current_debt'] > 0:
+            return False, f"Cannot delete customer with an active debt of GHS {cust['current_debt']:.2f}."
+        conn.execute("DELETE FROM customers WHERE id = ?", (customer_id,))
+        conn.commit()
+        return True, "Customer deleted."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
+
+
+def record_customer_installment(customer_id, amount_paid, payment_method, note, user_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("BEGIN TRANSACTION")
+        cust = cursor.execute("SELECT current_debt, name FROM customers WHERE id = ?", (customer_id,)).fetchone()
+        if not cust:
+            return False, "Customer not found."
+
+        bal_before = cust['current_debt']
+        if bal_before <= 0:
+            return False, "Customer has zero debt balance."
+
+        bal_after = max(0.0, bal_before - amount_paid)
+
+        cursor.execute("""
+            UPDATE customers
+            SET current_debt = ?
+            WHERE id = ?
+        """, (bal_after, customer_id))
+
+        cursor.execute("""
+            INSERT INTO customer_payments (customer_id, amount_paid, payment_method, balance_before, balance_after, payment_note, received_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (customer_id, amount_paid, payment_method, bal_before, bal_after, note, user_id))
+
+        conn.commit()
+        return True, f"Recorded GHS {amount_paid:.2f} installment. Remaining debt: GHS {bal_after:.2f}"
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
+    finally:
+        conn.close()
+
+
+def get_customer_payments(customer_id):
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT cp.*, u.full_name as receiver_name
+        FROM customer_payments cp
+        LEFT JOIN users u ON cp.received_by = u.id
+        WHERE cp.customer_id = ?
+        ORDER BY cp.payment_date DESC
+    """, (customer_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

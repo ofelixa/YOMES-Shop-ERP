@@ -1,190 +1,326 @@
 # printing_engine.py
 import os
+import sys
+from datetime import datetime
+from PIL import Image, ImageDraw, ImageFont
+import win32print
+import win32ui
+from PIL import ImageWin
+
+# ReportLab for A4 Invoice and Daily Sales Audit Reports
 from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
-COMPANY_NAME = "YOMES ELECTRICAL & HOME SOLUTION"
-COMPANY_PHONE = "+233 00 000 0000"
-COMPANY_ADDR = "Accra, Ghana"
-CURRENCY = "GHS"
+
+def get_image_path():
+    candidates = ["YOMES.png", "YOMES.jpeg", "YOMES.jpg", "logo.png", "logo.jpeg", "logo.jpg"]
+    for c in candidates:
+        if hasattr(sys, '_MEIPASS'):
+            p = os.path.join(sys._MEIPASS, c)
+            if os.path.exists(p):
+                return p
+        if os.path.exists(c):
+            return c
+    return None
 
 
-def generate_thermal_slip_text(receipt_no, date_str, items, total, paid, balance, customer_name="Walk-in Customer",
-                               payment_type="CASH"):
-    width = 32
-    slip = []
-    slip.append(COMPANY_NAME.center(width))
-    slip.append(COMPANY_ADDR.center(width))
-    slip.append(COMPANY_PHONE.center(width))
-    slip.append("-" * width)
-    slip.append(f"Receipt: {receipt_no}")
-    slip.append(f"Date: {date_str}")
-    slip.append(f"Customer: {customer_name[:16]}")
-    slip.append(f"Payment: {payment_type}")
-    slip.append("-" * width)
-    slip.append(f"{'Item':<16}{'Qty':<4}{'Total':>12}")
-    slip.append("-" * width)
+# =============================================================================
+# 1. DIRECT GRAPHICAL THERMAL SLIP PRINTING (WITH LOGO, LOCATION & PHONE)
+# =============================================================================
+def print_thermal_receipt_direct(receipt_no, date_str, cart_items, total, paid, balance, customer_name, change=0.0):
+    """
+    Renders an 80mm thermal receipt directly as a monochrome bitmap image
+    and sends it straight to the default Windows POS printer.
+    """
+    # 80mm standard width at 203 DPI = 576 pixels printable width
+    width = 576
 
-    for it in items:
-        name = it['name'][:15]
-        qty = str(it['qty'])
-        total_str = f"{CURRENCY} {it['line_total']:.2f}"
-        slip.append(f"{name:<16}{qty:<4}{total_str:>12}")
+    # Dynamically estimate image height based on content
+    base_height = 320
+    items_height = len(cart_items) * 36
+    extra_height = 80 if (change > 0 or balance > 0) else 40
+    height = base_height + items_height + extra_height
 
-    slip.append("-" * width)
-    slip.append(f"{'Total:':<16}{f'{CURRENCY} {total:.2f}':>16}")
-    slip.append(f"{'Paid:':<16}{f'{CURRENCY} {paid:.2f}':>16}")
+    img = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(img)
+
+    # Standard Windows Truetype Fonts
+    try:
+        font_title = ImageFont.truetype("arialbd.ttf", 24)
+        font_bold = ImageFont.truetype("arialbd.ttf", 18)
+        font_regular = ImageFont.truetype("arial.ttf", 17)
+        font_small = ImageFont.truetype("arial.ttf", 15)
+    except Exception:
+        font_title = font_bold = font_regular = font_small = ImageFont.load_default()
+
+    y = 10
+
+    # 1. Draw Top Logo
+    img_path = get_image_path()
+    if img_path and os.path.exists(img_path):
+        try:
+            logo = Image.open(img_path).convert("RGBA")
+            logo_w = 90
+            logo_h = int(logo.height * (logo_w / logo.width))
+            logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
+
+            # Center logo
+            logo_x = (width - logo_w) // 2
+            img.paste(logo, (logo_x, y), mask=logo)
+            y += logo_h + 10
+        except Exception:
+            pass
+
+    # 2. Header & Store Info
+    draw.text((width // 2, y), "YOMES ELECTRICAL & HOME SOLUTION", fill="black", font=font_title, anchor="mt")
+    y += 28
+    draw.text((width // 2, y), "Wholesale & Retail Electrical Supplies", fill="black", font=font_small, anchor="mt")
+    y += 20
+    draw.text((width // 2, y), "Location: Pokuase  |  Tel: +233 55 840 5048", fill="black", font=font_bold, anchor="mt")
+    y += 24
+    draw.text((width // 2, y), f"Rec: {receipt_no}  |  {date_str}", fill="black", font=font_small, anchor="mt")
+    y += 20
+    draw.text((width // 2, y), f"Customer: {customer_name}", fill="black", font=font_small, anchor="mt")
+    y += 24
+
+    # 3. Table Headers
+    draw.line([(15, y), (width - 15, y)], fill="black", width=2)
+    y += 6
+    draw.text((15, y), "Item Description", fill="black", font=font_bold)
+    draw.text((320, y), "Qty", fill="black", font=font_bold, anchor="mt")
+    draw.text((420, y), "Price", fill="black", font=font_bold, anchor="mt")
+    draw.text((width - 15, y), "Total", fill="black", font=font_bold, anchor="ra")
+    y += 24
+    draw.line([(15, y), (width - 15, y)], fill="black", width=1)
+    y += 10
+
+    # 4. Item Rows
+    for it in cart_items:
+        name = it['name'][:22]
+        qty_str = f"{it['qty']:.0f}" if it['qty'].is_integer() else f"{it['qty']:.1f}"
+        price_str = f"{it['selling_price']:.2f}"
+        tot_str = f"{it['line_total']:.2f}"
+
+        draw.text((15, y), name, fill="black", font=font_regular)
+        draw.text((320, y), qty_str, fill="black", font=font_regular, anchor="mt")
+        draw.text((420, y), price_str, fill="black", font=font_regular, anchor="mt")
+        draw.text((width - 15, y), tot_str, fill="black", font=font_regular, anchor="ra")
+        y += 26
+
+    # 5. Financial Totals
+    y += 4
+    draw.line([(15, y), (width - 15, y)], fill="black", width=2)
+    y += 8
+
+    draw.text((320, y), "Gross Total:", fill="black", font=font_bold, anchor="ra")
+    draw.text((width - 15, y), f"GHS {total:.2f}", fill="black", font=font_bold, anchor="ra")
+    y += 24
+
+    draw.text((320, y), "Amount Paid:", fill="black", font=font_regular, anchor="ra")
+    draw.text((width - 15, y), f"GHS {paid:.2f}", fill="black", font=font_regular, anchor="ra")
+    y += 22
+
+    if change > 0:
+        draw.text((320, y), "Change Returned:", fill="black", font=font_bold, anchor="ra")
+        draw.text((width - 15, y), f"GHS {change:.2f}", fill="black", font=font_bold, anchor="ra")
+        y += 22
+
     if balance > 0:
-        slip.append(f"{'Balance Due:':<16}{f'{CURRENCY} {balance:.2f}':>16}")
-    slip.append("=" * width)
-    slip.append("Thank you for your business!".center(width))
-    slip.append("Goods sold are not returnable.".center(width))
+        draw.text((320, y), "Debt Balance:", fill="black", font=font_bold, anchor="ra")
+        draw.text((width - 15, y), f"GHS {balance:.2f}", fill="black", font=font_bold, anchor="ra")
+        y += 22
 
-    return "\n".join(slip)
+    # 6. Footer
+    y += 6
+    draw.line([(15, y), (width - 15, y)], fill="black", width=1)
+    y += 10
+    draw.text((width // 2, y), "Thank you for your business!", fill="black", font=font_bold, anchor="mt")
+    y += 20
+    draw.text((width // 2, y), "Goods sold in good condition are not returnable.", fill="black", font=font_small,
+              anchor="mt")
+    y += 25
+
+    # Crop image to exact used height
+    final_img = img.crop((0, 0, width, y))
+
+    # Send directly to the Windows Default Printer
+    send_image_to_printer(final_img)
 
 
-def generate_a4_invoice_pdf(file_path, receipt_no, date_str, items, total, paid, balance, customer_data=None):
-    doc = SimpleDocTemplate(file_path, pagesize=A4, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
-    story = []
+def send_image_to_printer(pil_image):
+    """Prints a PIL Image directly to the Windows Default Printer using win32ui."""
+    printer_name = win32print.GetDefaultPrinter()
+
+    hDC = win32ui.CreateDC()
+    hDC.CreatePrinterDC(printer_name)
+    hDC.StartDoc("YOMES POS Receipt")
+    hDC.StartPage()
+
+    dib = ImageWin.Dib(pil_image)
+    printable_width = hDC.GetDeviceCaps(8)  # HORZRES
+    scale_factor = printable_width / pil_image.width
+    dest_w = int(pil_image.width * scale_factor)
+    dest_h = int(pil_image.height * scale_factor)
+
+    dib.draw(hDC.GetHandleOutput(), (0, 0, dest_w, dest_h))
+
+    hDC.EndPage()
+    hDC.EndDoc()
+    hDC.DeleteDC()
+
+
+# =============================================================================
+# 2. A4 OFFICIAL INVOICE (PDF)
+# =============================================================================
+def generate_a4_invoice_pdf(filename, receipt_no, date_str, cart_items, total, paid, balance, customer_info,
+                            change=0.0):
+    doc = SimpleDocTemplate(filename, pagesize=A4, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    elements = []
     styles = getSampleStyleSheet()
-    meta_style = ParagraphStyle('Meta', parent=styles['Normal'], fontSize=9, leading=12)
 
-    header_data = [
-        [
-            Paragraph(f"<b>{COMPANY_NAME}</b><br/>{COMPANY_ADDR}<br/>Tel: {COMPANY_PHONE}", meta_style),
-            Paragraph(f"<b>OFFICIAL INVOICE / RECEIPT</b><br/><b>No:</b> {receipt_no}<br/><b>Date:</b> {date_str}",
-                      meta_style)
-        ]
+    title_style = ParagraphStyle(
+        'MainTitle',
+        parent=styles['Heading1'],
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor("#1E3A8A"),
+        spaceAfter=2
+    )
+
+    img_p = get_image_path()
+    if img_p:
+        try:
+            logo = RLImage(img_p, width=65, height=65)
+            header_table = Table([[logo, [
+                Paragraph("<b>YOMES ELECTRICAL & HOME SOLUTION</b>", title_style),
+                Paragraph("Wholesale & Retail Electrical Supplies | Pokuase | Tel: +233 55 840 5048", styles['Normal'])
+            ]]], colWidths=[75, 445])
+            header_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
+            elements.append(header_table)
+        except Exception:
+            elements.append(Paragraph("YOMES ELECTRICAL & HOME SOLUTION", title_style))
+    else:
+        elements.append(Paragraph("YOMES ELECTRICAL & HOME SOLUTION", title_style))
+
+    elements.append(Spacer(1, 15))
+
+    cust_name = customer_info['name'] if customer_info else "Walk-in Customer"
+    cust_phone = customer_info['phone'] if customer_info else "N/A"
+    cust_addr = customer_info['address'] if customer_info else "N/A"
+
+    info_data = [
+        [Paragraph(f"<b>Invoice To:</b> {cust_name}", styles['Normal']),
+         Paragraph(f"<b>Invoice No:</b> {receipt_no}", styles['Normal'])],
+        [Paragraph(f"<b>Phone:</b> {cust_phone}", styles['Normal']),
+         Paragraph(f"<b>Date:</b> {date_str}", styles['Normal'])],
+        [Paragraph(f"<b>Address:</b> {cust_addr}", styles['Normal']),
+         Paragraph("<b>Status:</b> Official Bill", styles['Normal'])]
     ]
-    t_header = Table(header_data, colWidths=[300, 220])
-    t_header.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
-    story.append(t_header)
-    story.append(Spacer(1, 15))
+    info_table = Table(info_data, colWidths=[270, 250])
+    info_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
+    elements.append(info_table)
+    elements.append(Spacer(1, 15))
 
-    cust_name = customer_data.get('name', 'Walk-in Customer') if customer_data else 'Walk-in Customer'
-    cust_phone = customer_data.get('phone', 'N/A') if customer_data else 'N/A'
-    cust_address = customer_data.get('address', 'N/A') if customer_data else 'N/A'
-
-    cust_box = [
-        [Paragraph(f"<b>Billed To:</b> {cust_name}", meta_style), Paragraph(f"<b>Phone:</b> {cust_phone}", meta_style)],
-        [Paragraph(f"<b>Address:</b> {cust_address}", meta_style),
-         Paragraph(f"<b>Account Status:</b> Internal Record", meta_style)]
-    ]
-    t_cust = Table(cust_box, colWidths=[260, 260])
-    t_cust.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
-        ('BOX', (0, 0), (-1, -1), 1, colors.HexColor("#CBD5E1")),
-        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
-        ('PADDING', (0, 0), (-1, -1), 6),
-    ]))
-    story.append(t_cust)
-    story.append(Spacer(1, 15))
-
-    table_rows = [["#", "Item Description", "Qty", f"Unit Price ({CURRENCY})", f"Total ({CURRENCY})"]]
-    for idx, item in enumerate(items, 1):
-        table_rows.append([
+    table_data = [["#", "Item Description", "Qty", "Unit Price (GHS)", "Total (GHS)"]]
+    for idx, it in enumerate(cart_items, start=1):
+        table_data.append([
             str(idx),
-            item['name'],
-            str(item['qty']),
-            f"{item['selling_price']:.2f}",
-            f"{item['line_total']:.2f}"
+            it['name'],
+            f"{it['qty']:.0f}" if it['qty'].is_integer() else f"{it['qty']:.1f}",
+            f"{it['selling_price']:.2f}",
+            f"{it['line_total']:.2f}"
         ])
 
-    t_items = Table(table_rows, colWidths=[30, 270, 50, 85, 85])
-    t_items.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1E293B")),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('ALIGN', (2, 0), (-1, -1), 'RIGHT'),
+    table_data.append(["", "", "", "Total Gross Amount:", f"GHS {total:.2f}"])
+    table_data.append(["", "", "", "Amount Tendered / Paid:", f"GHS {paid:.2f}"])
+
+    if change > 0:
+        table_data.append(["", "", "", "Customer Change:", f"GHS {change:.2f}"])
+    if balance > 0:
+        table_data.append(["", "", "", "Outstanding Balance (Debt):", f"GHS {balance:.2f}"])
+
+    item_table = Table(table_data, colWidths=[30, 250, 50, 110, 80])
+    item_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#2563EB")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('ALIGN', (1, 1), (1, -1), 'LEFT'),
+        ('ALIGN', (3, 1), (-1, -1), 'RIGHT'),
+        ('GRID', (0, 0), (-1, -3 if (change > 0 or balance > 0) else -2), 0.5, colors.grey),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+        ('TOPPADDING', (0, 0), (-1, -1), 5),
+        ('FONTNAME', (3, -3), (-1, -1), 'Helvetica-Bold'),
+        ('BACKGROUND', (3, -3), (-1, -1), colors.HexColor("#F3F4F6"))
     ]))
-    story.append(t_items)
-    story.append(Spacer(1, 15))
+    elements.append(item_table)
+    elements.append(Spacer(1, 25))
+    elements.append(
+        Paragraph("<i>Thank you for your business! All warranty items are subject to manufacturer terms.</i>",
+                  styles['Normal']))
 
-    summary_data = [
-        ["Subtotal:", f"{CURRENCY} {total:.2f}"],
-        ["Amount Paid:", f"{CURRENCY} {paid:.2f}"],
-        ["Balance Due / Outstanding:", f"{CURRENCY} {balance:.2f}"]
-    ]
-    t_summary = Table(summary_data, colWidths=[150, 100])
-    t_summary.setStyle(TableStyle([
-        ('ALIGN', (0, 0), (-1, -1), 'RIGHT'),
-        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-        ('LINEABOVE', (0, -1), (-1, -1), 1, colors.black),
-        ('PADDING', (0, 0), (-1, -1), 4),
-    ]))
-
-    outer_summary = Table([["", t_summary]], colWidths=[270, 250])
-    story.append(outer_summary)
-
-    doc.build(story)
-    return file_path
+    doc.build(elements)
 
 
-def generate_daily_sales_pdf_report(file_path, report_date, sales_rows, summary_stats):
-    doc = SimpleDocTemplate(file_path, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
-    story = []
+# =============================================================================
+# 3. DAILY SALES REPORT (PDF)
+# =============================================================================
+def generate_daily_sales_pdf_report(filename, query_date, sales_list, summary_stats):
+    doc = SimpleDocTemplate(filename, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    elements = []
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, leading=20,
-                                 textColor=colors.HexColor("#1E293B"))
-    meta_style = ParagraphStyle('MetaStyle', parent=styles['Normal'], fontSize=9, leading=13)
 
-    story.append(Paragraph(f"<b>{COMPANY_NAME}</b>", title_style))
-    story.append(Paragraph(f"Daily Sales Audit Report | Date: <b>{report_date}</b>", meta_style))
-    story.append(Spacer(1, 10))
+    img_p = get_image_path()
+    if img_p:
+        try:
+            logo = RLImage(img_p, width=45, height=45)
+            header_table = Table([[logo, [
+                Paragraph("<b>YOMES ELECTRICAL - DAILY SALES AUDIT</b>", styles['Heading1']),
+                Paragraph(f"<b>Pokuase Branch</b> | Tel: +233 55 840 5048 | Audit Date: {query_date}", styles['Normal'])
+            ]]], colWidths=[55, 480])
+            header_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
+            elements.append(header_table)
+        except Exception:
+            elements.append(Paragraph("<b>YOMES ELECTRICAL - DAILY SALES AUDIT</b>", styles['Heading1']))
+    else:
+        elements.append(Paragraph("<b>YOMES ELECTRICAL - DAILY SALES AUDIT</b>", styles['Heading1']))
 
-    # Summary Statistics Box
-    sum_data = [
-        [
-            Paragraph(f"<b>Total Orders:</b> {summary_stats['count']}", meta_style),
-            Paragraph(f"<b>Gross Revenue:</b> {CURRENCY} {summary_stats['total_revenue']:.2f}", meta_style),
-            Paragraph(f"<b>Total Paid:</b> {CURRENCY} {summary_stats['total_paid']:.2f}", meta_style),
-            Paragraph(f"<b>Credit / Balance Due:</b> {CURRENCY} {summary_stats['total_balance']:.2f}", meta_style)
-        ]
-    ]
-    t_sum = Table(sum_data, colWidths=[130, 135, 135, 135])
-    t_sum.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#F8FAFC")),
-        ('BOX', (0, 0), (-1, -1), 1, colors.HexColor("#CBD5E1")),
-        ('PADDING', (0, 0), (-1, -1), 6),
-    ]))
-    story.append(t_sum)
-    story.append(Spacer(1, 15))
+    elements.append(Spacer(1, 10))
 
-    # Table breakdown
-    table_rows = [
-        ["Time", "Receipt No", "Customer", "Method", f"Total ({CURRENCY})", f"Paid ({CURRENCY})", f"Bal ({CURRENCY})",
-         "Cashier"]]
-    for r in sales_rows:
-        time_part = r['sale_date'].split()[1][:5] if ' ' in r['sale_date'] else r['sale_date']
-        table_rows.append([
+    data = [["Time", "Receipt No", "Customer", "Method", "Total (GHS)", "Paid (GHS)", "Bal (GHS)", "Cashier"]]
+    for s in sales_list:
+        time_part = s['sale_date'].split()[1][:5] if ' ' in s['sale_date'] else s['sale_date']
+        data.append([
             time_part,
-            r['receipt_no'],
-            (r['customer_name'] or "Walk-in")[:15],
-            r['payment_method'],
-            f"{r['total_amount']:.2f}",
-            f"{r['amount_paid']:.2f}",
-            f"{r['balance_due']:.2f}",
-            r['cashier_name'][:12]
+            s['receipt_no'],
+            (s['customer_name'] or "Walk-in")[:16],
+            s['payment_method'],
+            f"{s['total_amount']:.2f}",
+            f"{s['amount_paid']:.2f}",
+            f"{s['balance_due']:.2f}",
+            s['cashier_name'] or "Staff"
         ])
 
-    t_sales = Table(table_rows, colWidths=[40, 95, 95, 60, 65, 65, 55, 60])
-    t_sales.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1E293B")),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, -1), 8),
+    data.append(["", "", "", "SUMMARY TOTALS:",
+                 f"{summary_stats['total_revenue']:.2f}",
+                 f"{summary_stats['total_paid']:.2f}",
+                 f"{summary_stats['total_balance']:.2f}", ""])
+
+    tv_table = Table(data, colWidths=[40, 95, 100, 60, 75, 75, 60, 60])
+    tv_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
         ('ALIGN', (2, 1), (2, -1), 'LEFT'),
-        ('ALIGN', (4, 1), (6, -1), 'RIGHT'),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-        ('PADDING', (0, 0), (-1, -1), 4),
+        ('GRID', (0, 0), (-1, -2), 0.5, colors.grey),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor("#E5E7EB")),
+        ('FONTSIZE', (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 4)
     ]))
-    story.append(t_sales)
-
-    doc.build(story)
-    return file_path
+    elements.append(tv_table)
+    doc.build(elements)
