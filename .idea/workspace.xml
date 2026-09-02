@@ -6,14 +6,8 @@
   <component name="ChangeListManager">
     <list default="true" id="419b7735-405a-4888-8e47-ecc2c8b10fe5" name="Changes" comment="😎😎">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/YOMES.ico" beforeDir="false" afterPath="$PROJECT_DIR$/YOMES.ico" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/YOMES.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/YOMES_Shop.spec" beforeDir="false" afterPath="$PROJECT_DIR$/YOMES_Shop.spec" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/build/YOMES_Shop/YOMES_Shop.pkg" beforeDir="false" afterPath="$PROJECT_DIR$/build/YOMES_Shop/YOMES_Shop.pkg" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/db_manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/db_manager.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/dist/YOMES_Shop.exe" beforeDir="false" afterPath="$PROJECT_DIR$/dist/YOMES_Shop.exe" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/printing_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/printing_engine.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -139,10 +133,19 @@
       <option name="project" value="LOCAL" />
       <updated>1787104174692</updated>
     </task>
-    <option name="localTasksCounter" value="4" />
+    <task id="LOCAL-00004" summary="😎😎">
+      <option name="closed" value="true" />
+      <created>1787942913802</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1787942913802</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
+    <MESSAGE value="" />
     <MESSAGE value="" />
     <option name="LAST_COMMIT_MESSAGE" value="" />
   </component>

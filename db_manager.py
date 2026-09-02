@@ -4,7 +4,9 @@ import os
 import sys
 import shutil
 import csv
+import re
 from datetime import datetime
+import pdfplumber
 
 
 def get_db_path(filename="yomes_enterprise.db"):
@@ -29,7 +31,7 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Users Table
+    # 1. Users Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,7 +47,15 @@ def init_db():
         )
     """)
 
-    # Customers Table
+    user_cols = [col[1] for col in cursor.execute("PRAGMA table_info(users)").fetchall()]
+    if "security_question" not in user_cols:
+        cursor.execute("ALTER TABLE users ADD COLUMN security_question TEXT")
+    if "security_answer" not in user_cols:
+        cursor.execute("ALTER TABLE users ADD COLUMN security_answer TEXT")
+    if "must_change_password" not in user_cols:
+        cursor.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
+
+    # 2. Customers Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS customers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +67,7 @@ def init_db():
         )
     """)
 
-    # Products Table
+    # 3. Products Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,7 +81,13 @@ def init_db():
         )
     """)
 
-    # Sales Master Table
+    prod_cols = [col[1] for col in cursor.execute("PRAGMA table_info(products)").fetchall()]
+    if "reorder_level" not in prod_cols:
+        cursor.execute("ALTER TABLE products ADD COLUMN reorder_level REAL NOT NULL DEFAULT 5.0")
+    if "cost_price" not in prod_cols:
+        cursor.execute("ALTER TABLE products ADD COLUMN cost_price REAL DEFAULT 0.0")
+
+    # 4. Sales Master Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sales (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,7 +104,7 @@ def init_db():
         )
     """)
 
-    # Sale Items Table
+    # 5. Sale Items Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sale_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,7 +121,7 @@ def init_db():
         )
     """)
 
-    # Customer Installment Payments Table
+    # 6. Customer Installment Payments Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS customer_payments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,7 +138,19 @@ def init_db():
         )
     """)
 
-    # Ensure Admin exists and always has active password recovery
+    # 7. Expenses Table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS expenses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            amount REAL NOT NULL,
+            description TEXT,
+            expense_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            logged_by INTEGER,
+            FOREIGN KEY (logged_by) REFERENCES users(id)
+        )
+    """)
+
     admin = cursor.execute("SELECT * FROM users WHERE LOWER(username) = 'admin'").fetchone()
     if not admin:
         cursor.execute("""
@@ -130,7 +158,8 @@ def init_db():
             VALUES ('admin', 'admin123', 'System Administrator', 'Admin', 'Active', 0, 'What is your favorite electrical brand?', 'YOMES')
         """)
     else:
-        if not admin['security_question'] or not admin['security_answer']:
+        admin_dict = dict(admin)
+        if not admin_dict.get('security_question') or not admin_dict.get('security_answer'):
             cursor.execute("""
                 UPDATE users 
                 SET security_question = 'What is your favorite electrical brand?',
@@ -140,6 +169,49 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+
+# =============================================================================
+# EXPENSE MANAGEMENT
+# =============================================================================
+def record_expense(category, amount, description, logged_by):
+    conn = get_connection()
+    try:
+        conn.execute("""
+            INSERT INTO expenses (category, amount, description, logged_by)
+            VALUES (?, ?, ?, ?)
+        """, (category.strip(), float(amount), description.strip(), logged_by))
+        conn.commit()
+        return True, "Expense recorded successfully."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
+
+
+def get_expenses_list(limit=100):
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT e.*, u.full_name as logger_name
+        FROM expenses e
+        LEFT JOIN users u ON e.logged_by = u.id
+        ORDER BY e.expense_date DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_expense(expense_id):
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+        conn.commit()
+        return True, "Expense deleted."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
 
 
 # =============================================================================
@@ -228,7 +300,7 @@ def delete_user(user_id):
 
 
 # =============================================================================
-# INVENTORY, BULK IMPORT & TEMPLATES
+# INVENTORY, BATCH DELETION & BULK RESTOCKING
 # =============================================================================
 def update_product_info(product_id, name, category, cost_price, selling_price, stock_quantity, reorder_level):
     conn = get_connection()
@@ -252,6 +324,22 @@ def delete_product(product_id):
         conn.execute("DELETE FROM products WHERE id = ?", (product_id,))
         conn.commit()
         return True, "Product deleted."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
+
+
+def delete_multiple_products(product_ids):
+    """Deletes an arbitrary list of product IDs in a single atomic transaction."""
+    if not product_ids:
+        return True, "No items selected."
+    conn = get_connection()
+    try:
+        placeholders = ",".join("?" for _ in product_ids)
+        conn.execute(f"DELETE FROM products WHERE id IN ({placeholders})", tuple(product_ids))
+        conn.commit()
+        return True, f"Successfully removed {len(product_ids)} items."
     except Exception as e:
         return False, str(e)
     finally:
@@ -298,7 +386,6 @@ def bulk_import_products_from_csv(file_path):
                     cp = float(row.get("cost_price", 0) or 0.0)
                     sp = float(row.get("selling_price", 0) or 0.0)
                     qty = float(row.get("stock_quantity", 0) or 0.0)
-                    # Automatically calculate 20% alert threshold if not specified
                     alert_min = float(row.get("reorder_level", max(1.0, qty * 0.20)) or max(1.0, qty * 0.20))
                 except ValueError:
                     errors.append(f"Row {line_no}: Invalid numeric values for '{name}'")
@@ -329,6 +416,103 @@ def bulk_import_products_from_csv(file_path):
     except Exception as e:
         conn.rollback()
         return False, f"Import Failed: {str(e)}"
+    finally:
+        conn.close()
+
+
+def bulk_import_products_from_pdf(file_path):
+    """
+    Extracts tabular product data directly from PDF files.
+    Applies regex cleaning on '400.00/PCS' and ACCUMULATES onto existing stock.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    inserted_count = 0
+    updated_count = 0
+
+    try:
+        cursor.execute("BEGIN TRANSACTION")
+        with pdfplumber.open(file_path) as pdf:
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                for table in tables:
+                    if not table or len(table) < 2:
+                        continue
+
+                    header = [str(c).strip().lower().replace(" ", "_") if c else "" for c in table[0]]
+
+                    def find_col(aliases):
+                        for alias in aliases:
+                            for idx, h in enumerate(header):
+                                if alias in h:
+                                    return idx
+                        return None
+
+                    name_col = find_col(["name", "item", "product", "description"])
+                    cat_col = find_col(["cat", "category", "group", "type"])
+                    cost_col = find_col(["cost", "buying", "cp"])
+                    sell_col = find_col(["unit_price", "sell", "price", "sp", "rate"])
+                    qty_col = find_col(["qty", "stock", "quantity", "count"])
+                    alert_col = find_col(["alert", "reorder", "min", "threshold"])
+
+                    if name_col is None or (sell_col is None and qty_col is None):
+                        continue
+
+                    def clean_num(val, default=0.0):
+                        if val is None:
+                            return default
+                        if isinstance(val, (int, float)):
+                            return float(val)
+                        s = str(val).replace(",", "").strip()
+                        match = re.search(r"[-+]?\d+(?:\.\d+)?", s)
+                        if match:
+                            try:
+                                return float(match.group())
+                            except ValueError:
+                                return default
+                        return default
+
+                    for row in table[1:]:
+                        if not row or not any(row):
+                            continue
+
+                        raw_name = str(row[name_col]).strip() if name_col < len(row) and row[name_col] else ""
+                        if not raw_name or raw_name.lower() in ("total", "subtotal", "name", "item", "description",
+                                                                "product name"):
+                            continue
+
+                        category = str(row[cat_col]).strip() if (
+                                    cat_col is not None and cat_col < len(row) and row[cat_col]) else "General"
+                        cp = clean_num(row[cost_col]) if (cost_col is not None and cost_col < len(row)) else 0.0
+                        sp = clean_num(row[sell_col]) if (sell_col is not None and sell_col < len(row)) else 0.0
+                        qty = clean_num(row[qty_col]) if (qty_col is not None and qty_col < len(row)) else 0.0
+                        alert_min = clean_num(row[alert_col], max(1.0, qty * 0.20)) if (
+                                    alert_col is not None and alert_col < len(row)) else max(1.0, qty * 0.20)
+
+                        if sp <= 0 and cp <= 0 and qty <= 0:
+                            continue
+
+                        existing = cursor.execute("SELECT id FROM products WHERE LOWER(name) = LOWER(?)",
+                                                  (raw_name,)).fetchone()
+                        if existing:
+                            cursor.execute("""
+                                UPDATE products
+                                SET category = ?, cost_price = ?, selling_price = ?, stock_quantity = stock_quantity + ?, reorder_level = ?
+                                WHERE id = ?
+                            """, (category, cp, sp, qty, alert_min, existing['id']))
+                            updated_count += 1
+                        else:
+                            cursor.execute("""
+                                INSERT INTO products (name, category, cost_price, selling_price, stock_quantity, reorder_level)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                            """, (raw_name, category, cp, sp, qty, alert_min))
+                            inserted_count += 1
+
+        conn.commit()
+        return True, f"PDF Stock Import Completed!\n\n- New Items Added: {inserted_count}\n- Existing Items Restocked: {updated_count}"
+    except Exception as e:
+        conn.rollback()
+        return False, f"PDF Stock Extraction Failed: {str(e)}"
     finally:
         conn.close()
 
